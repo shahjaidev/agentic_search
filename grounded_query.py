@@ -12,6 +12,7 @@ import sys
 from typing import Any, Dict
 
 import google.generativeai as genai
+from google.generativeai import protos  # for Tool / GoogleSearchRetrieval
 
 MODEL_NAME = "models/gemini-2.5-flash"
 DEFAULT_QUERY = "companies in sf focusing on deeptech started after 2023"
@@ -20,7 +21,7 @@ DEFAULT_QUERY = "companies in sf focusing on deeptech started after 2023"
 def load_api_key() -> str:
     try:
         return os.environ["GEMINI_API_KEY"].strip()
-    except KeyError as exc:  # pragma: no cover (simple guard)
+    except KeyError as exc:  # pragma: no cover
         raise RuntimeError("Set GEMINI_API_KEY in your environment.") from exc
 
 
@@ -38,9 +39,12 @@ def build_prompt(user_query: str) -> str:
 def request_grounded_json(user_query: str) -> Dict[str, Any]:
     genai.configure(api_key=load_api_key())
 
+    # Enable Google Grounding (correct tool name: google_search_retrieval)
+    tool = protos.Tool(google_search_retrieval=protos.GoogleSearchRetrieval())
+
     model = genai.GenerativeModel(
         model_name=MODEL_NAME,
-        tools=[{"google_search": {}}],  # enables Google Grounding
+        tools=[tool],
         generation_config={
             "temperature": 0,
             "top_p": 0.8,
@@ -48,9 +52,32 @@ def request_grounded_json(user_query: str) -> Dict[str, Any]:
         },
     )
 
+    # Generate and robustly coerce to JSON
     response = model.generate_content(build_prompt(user_query))
-    payload = response.text or "{}"
-    return json.loads(payload)
+
+    # response.text should already be JSON because of response_mime_type
+    payload_text = (response.text or "").strip()
+    if not payload_text:
+        return {"query": user_query, "summary": "", "facts": [], "suggested_sql_columns": []}
+
+    try:
+        return json.loads(payload_text)
+    except json.JSONDecodeError:
+        # Fallback: try to extract first JSON block from the candidate parts if any
+        for cand in getattr(response, "candidates", []) or []:
+            for part in getattr(cand.content, "parts", []) or []:
+                if hasattr(part, "text"):
+                    try:
+                        return json.loads(part.text)
+                    except json.JSONDecodeError:
+                        continue
+        # Last resort: wrap raw text
+        return {
+            "query": user_query,
+            "summary": payload_text,
+            "facts": [],
+            "suggested_sql_columns": [],
+        }
 
 
 def main() -> None:
