@@ -1,0 +1,39 @@
+"""Application configuration and settings management."""
+
+from __future__ import annotations
+
+from functools import lru_cache
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Runtime configuration loaded from environment variables or `.env`."""
+
+    gemini_api_key: str = Field(
+        default="",
+        description="API key for the Gemini model (2.5 Flash with Grounding).",
+    )
+    database_url: str = Field(
+        default="sqlite:///yc_custom.db",
+        description="SQLAlchemy database URL for SQLite storage.",
+    )
+    gemini_model: str = Field(
+        default="models/gemini-2.5-flash",
+        description="Gemini model identifier to use for chat completions.",
+    )
+
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """Return a cached copy of the application settings."""
+
+    return Settings()
+
+
+settings = get_settings()
+
+
