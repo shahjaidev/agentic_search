@@ -18,6 +18,14 @@ Quick start::
         --max-workers 64 \
         --limit 100
 
+Run multiple enrichment passes in one go by repeating flags::
+
+    python yc_enrich.py \
+        --db data/yc_db.db \
+        --attribute founders_summary --query "Summarise founders" \
+        --attribute product_summary --query "Describe the product in 1 sentence" \
+        --sources-column founders_sources --sources-column product_sources
+
 Adjust ``--table`` if your startups live outside ``yc_companies`` and use
 ``--jsonl-out -`` to disable the audit log.
 """
@@ -72,6 +80,22 @@ def validate_column_name(column: str, label: str) -> str:
     if not VALID_COLUMN_RE.fullmatch(column):
         raise ValueError(f"{label} must be a valid SQL column identifier (letters, numbers, underscore): {column!r}")
     return column
+
+
+def normalise_option_list(
+    values: Optional[list[str]],
+    count: int,
+    label: str,
+    parser: argparse.ArgumentParser,
+) -> list[Optional[str]]:
+    if not values:
+        return [None] * count
+    cleaned = [value.strip() for value in values]
+    if len(cleaned) == 1 and count > 1:
+        return cleaned * count
+    if len(cleaned) != count:
+        parser.error(f"{label} must be provided once or {count} times to match --attribute")
+    return cleaned
 
 
 def append_jsonl(jsonl_path: Optional[Path], lock: threading.Lock, record: Dict[str, Any]) -> None:
@@ -282,19 +306,128 @@ def worker(
             time.sleep(0.1)  # light throttling to respect rate limits
 
 
-def parse_args() -> argparse.Namespace:
+def run_enrichment_task(
+    *,
+    db_path: Path,
+    table: str,
+    attribute: str,
+    query: str,
+    sources_column: Optional[str],
+    notes_column: Optional[str],
+    raw_column: Optional[str],
+    limit: Optional[int],
+    force: bool,
+    max_workers: int,
+    temperature: float,
+    use_grounding: bool,
+    api_key: str,
+    jsonl_path: Optional[Path],
+    jsonl_lock: threading.Lock,
+) -> None:
+    with sqlite3.connect(db_path) as conn:
+        ensure_column(conn, table, attribute)
+        if sources_column:
+            ensure_column(conn, table, sources_column)
+        if notes_column:
+            ensure_column(conn, table, notes_column)
+        if raw_column:
+            ensure_column(conn, table, raw_column)
+        rows = fetch_rows(conn, table, attribute, limit, force)
+
+    if not rows:
+        print(f"No rows require enrichment for column '{attribute}'. Skipping.")
+        return
+
+    print(
+        f"Queued {len(rows):,} rows from '{table}' for enrichment of column '{attribute}'."
+    )
+
+    task_queue: "queue.Queue[EnrichmentTask | None]" = queue.Queue()
+    progress = {"processed": 0, "success": 0, "failed": 0}
+    progress_lock = threading.Lock()
+
+    workers: list[threading.Thread] = []
+    for _ in range(max(1, max_workers)):
+        thread = threading.Thread(
+            target=worker,
+            kwargs={
+                "task_queue": task_queue,
+                "db_path": db_path,
+                "table": table,
+                "attribute": attribute,
+                "enrichment_query": query,
+                "api_key": api_key,
+                "temperature": temperature,
+                "use_grounding": use_grounding,
+                "sources_column": sources_column,
+                "notes_column": notes_column,
+                "raw_column": raw_column,
+                "progress": progress,
+                "progress_lock": progress_lock,
+                "jsonl_path": jsonl_path,
+                "jsonl_lock": jsonl_lock,
+            },
+            daemon=True,
+        )
+        thread.start()
+        workers.append(thread)
+
+    for row in rows:
+        task_queue.put(EnrichmentTask(row_id=row["id"], payload=row))
+
+    for _ in workers:
+        task_queue.put(None)
+
+    task_queue.join()
+
+    for thread in workers:
+        thread.join()
+
+    print(
+        "Completed enrichment for '{attribute}': {processed:,} processed, {success:,} succeeded, {failed:,} failed.".format(
+            attribute=attribute,
+            processed=progress["processed"],
+            success=progress["success"],
+            failed=progress["failed"],
+        )
+    )
+
+
+def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
     parser = argparse.ArgumentParser(description="Enrich YC startups using Gemini")
     parser.add_argument("--db", required=True, help="Path to the SQLite database (e.g. data/yc_db.db)")
-    parser.add_argument("--attribute", required=True, help="Column name to populate with the enriched value")
-    parser.add_argument("--query", required=True, help="Instruction for the enrichment agents")
+    parser.add_argument(
+        "--attribute",
+        action="append",
+        required=True,
+        help="Column name to populate with the enriched value (repeatable)",
+    )
+    parser.add_argument(
+        "--query",
+        action="append",
+        required=True,
+        help="Instruction for the enrichment agents (repeat to match attributes)",
+    )
     parser.add_argument(
         "--table",
         default="yc_companies",
         help="Name of the table containing startup records (default: yc_companies)",
     )
-    parser.add_argument("--sources-column", help="Optional column to store JSON array of sources")
-    parser.add_argument("--notes-column", help="Optional column to store freeform notes")
-    parser.add_argument("--raw-column", help="Optional column to store the full JSON response")
+    parser.add_argument(
+        "--sources-column",
+        action="append",
+        help="Optional column to store JSON array of sources (repeat or provide once)",
+    )
+    parser.add_argument(
+        "--notes-column",
+        action="append",
+        help="Optional column to store freeform notes (repeat or provide once)",
+    )
+    parser.add_argument(
+        "--raw-column",
+        action="append",
+        help="Optional column to store the full JSON response (repeat or provide once)",
+    )
     parser.add_argument(
         "--jsonl-out",
         default=DEFAULT_JSONL_LOG,
@@ -318,11 +451,12 @@ def parse_args() -> argparse.Namespace:
         help="Disable Google Search grounding (enabled by default)",
     )
     parser.set_defaults(use_grounding=True)
-    return parser.parse_args()
+    args = parser.parse_args()
+    return args, parser
 
 
 def main() -> None:
-    args = parse_args()
+    args, parser = parse_args()
     db_path = Path(args.db)
     if not db_path.exists():
         raise FileNotFoundError(f"Database not found at {db_path}")
@@ -333,79 +467,49 @@ def main() -> None:
     api_key = load_api_key()
 
     table = validate_column_name(args.table.strip(), "--table")
-    attribute = validate_column_name(args.attribute.strip(), "--attribute")
-    sources_column = validate_column_name(args.sources_column.strip(), "--sources-column") if args.sources_column else None
-    notes_column = validate_column_name(args.notes_column.strip(), "--notes-column") if args.notes_column else None
-    raw_column = validate_column_name(args.raw_column.strip(), "--raw-column") if args.raw_column else None
 
+    attributes = [validate_column_name(attr.strip(), "--attribute") for attr in args.attribute]
+    attr_count = len(attributes)
 
-    with sqlite3.connect(db_path) as conn:
-        ensure_column(conn, table, attribute)
-        if sources_column:
-            ensure_column(conn, table, sources_column)
-        if notes_column:
-            ensure_column(conn, table, notes_column)
-        if raw_column:
-            ensure_column(conn, table, raw_column)
-        rows = fetch_rows(conn, table, attribute, args.limit, args.force)
+    queries_raw = [q.strip() for q in args.query]
+    if len(queries_raw) == 1 and attr_count > 1:
+        queries = queries_raw * attr_count
+    elif len(queries_raw) != attr_count:
+        parser.error("--query must be provided once or the same number of times as --attribute")
+    else:
+        queries = queries_raw
 
-    if not rows:
-        print("No rows require enrichment. Nothing to do.")
-        return
+    sources_columns = normalise_option_list(args.sources_column, attr_count, "--sources-column", parser)
+    notes_columns = normalise_option_list(args.notes_column, attr_count, "--notes-column", parser)
+    raw_columns = normalise_option_list(args.raw_column, attr_count, "--raw-column", parser)
 
-    print(
-        f"Queued {len(rows):,} rows from '{table}' for enrichment of column '{attribute}'."
-    )
+    sources_columns = [validate_column_name(col, "--sources-column") if col else None for col in sources_columns]
+    notes_columns = [validate_column_name(col, "--notes-column") if col else None for col in notes_columns]
+    raw_columns = [validate_column_name(col, "--raw-column") if col else None for col in raw_columns]
 
-    task_queue: "queue.Queue[EnrichmentTask | None]" = queue.Queue()
-    progress = {"processed": 0, "success": 0, "failed": 0}
-    progress_lock = threading.Lock()
-    jsonl_lock = threading.Lock()
     jsonl_path = None if args.jsonl_out.strip() == "-" else Path(args.jsonl_out.strip())
+    jsonl_lock = threading.Lock()
 
-    workers: list[threading.Thread] = []
-    for _ in range(max(1, args.max_workers)):
-        thread = threading.Thread(
-            target=worker,
-            kwargs={
-                "task_queue": task_queue,
-                "db_path": db_path,
-                "table": table,
-                "attribute": attribute,
-                "enrichment_query": args.query,
-                "api_key": api_key,
-                "temperature": args.temperature,
-                "use_grounding": args.use_grounding,
-                "sources_column": sources_column,
-                "notes_column": notes_column,
-                "raw_column": raw_column,
-                "progress": progress,
-                "progress_lock": progress_lock,
-                "jsonl_path": jsonl_path,
-                "jsonl_lock": jsonl_lock,
-            },
-            daemon=True,
+    for attribute, query, sources_column, notes_column, raw_column in zip(
+        attributes, queries, sources_columns, notes_columns, raw_columns
+    ):
+        run_enrichment_task(
+            db_path=db_path,
+            table=table,
+            attribute=attribute,
+            query=query,
+            sources_column=sources_column,
+            notes_column=notes_column,
+            raw_column=raw_column,
+            limit=args.limit,
+            force=args.force,
+            max_workers=args.max_workers,
+            temperature=args.temperature,
+            use_grounding=args.use_grounding,
+            api_key=api_key,
+            jsonl_path=jsonl_path,
+            jsonl_lock=jsonl_lock,
         )
-        thread.start()
-        workers.append(thread)
-
-    for row in rows:
-        task_queue.put(EnrichmentTask(row_id=row["id"], payload=row))
-
-    # send sentinel to each worker
-    for _ in workers:
-        task_queue.put(None)
-
-    task_queue.join()
-
-    for thread in workers:
-        thread.join()
-
-    print(
-        "Completed enrichment: {processed:,} processed, {success:,} succeeded, {failed:,} failed.".format(
-            processed=progress["processed"], success=progress["success"], failed=progress["failed"]
-        )
-    )
 
 
 if __name__ == "__main__":
