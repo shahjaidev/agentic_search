@@ -5,26 +5,26 @@ Parallel enrichment pipeline for YC startup records.
 Given an existing SQLite database produced by ``yc_loader.py`` (or compatible
 schema), this script runs a Gemini-powered enrichment task for each startup and
 writes the results back into the target table (``yc_companies`` by default) while
-also appending a JSONL audit log (``yc_enriched_jsonl.jsnol`` by default).
+also appending a JSONL audit log (``yc_enriched_jsonl.jsonl`` by default).
 
 Quick start::
 
     export GOOGLE_API_KEY="sk-..."  # or set GEMINI_API_KEY
     python yc_enrich.py \
-        --db /Users/jaidevshah/agentic_search/data/yc_db.db \
+        --db /Users/jaidevshah/agentic_search/data/yc_companies.db \
         --attribute product_ \
         --query "Summarise the product in 1 line, and find their largest investor" \
         --sources-column founders_sources \
-        --max-workers 64 \
-        --limit 100
+        --max-workers 256
 
-Run multiple enrichment passes in one go by repeating flags::
 
     python yc_enrich.py \
-        --db data/yc_db.db \
-        --attribute founders_summary --query "Summarise founders" \
-        --attribute product_summary --query "Describe the product in 1 sentence" \
-        --sources-column founders_sources --sources-column product_sources
+        --db data/yc_companies.db \
+        --attribute product_vertical \
+        --query "Classify this company’s product vertical (e.g., robotics, video generation, social media, fintech, healthtech). Return one clear label." \
+        --sources-column product_vertical_sources \
+        --notes-column product_vertical_notes \
+        --max-workers 256
 
 Adjust ``--table`` if your startups live outside ``yc_companies`` and use
 ``--jsonl-out -`` to disable the audit log.
@@ -48,7 +48,7 @@ from google.genai import types
 
 MODEL_NAME = "gemini-2.5-flash-lite"
 DEFAULT_MAX_WORKERS = 4
-DEFAULT_JSONL_LOG = "/Users/jaidevshah/agentic_search/data/yc_enriched_jsonl.jsnol"
+DEFAULT_JSONL_LOG = "/Users/jaidevshah/agentic_search/data/yc_enriched_jsonl.jsonl"
 VALID_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 

@@ -44,8 +44,8 @@ COMPANY_SOURCES = {
 }
 META_URL = f"{BASE}/meta.json"
 
-DEFAULT_JSONL = "yc_db.jsonl"
-DEFAULT_SQLITE_URL = "sqlite:///data/yc_db.db"
+DEFAULT_JSONL = "yc_companies.jsonl"
+DEFAULT_SQLITE_URL = "sqlite:///data/yc_companies.db"
 
 JSON_FIELDS = {
     "former_names",
