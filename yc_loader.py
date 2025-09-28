@@ -12,7 +12,9 @@ Args (CLI flags):
   --limit N           Only process the first N companies (useful for sampling).
 
 Example:
-  python yc_loader.py --also top hiring --save-meta --limit 1000 --sqlite-url sqlite:///data/yc_custom.db
+  python yc_loader.py --also top hiring --save-meta --sqlite-url sqlite:///data/yc_custom.db
+
+  
 
 By default the script downloads the latest "all" companies list, stores a
 debugging JSONL snapshot, and mirrors the records into SQLite. You can reuse
