@@ -1,110 +1,52 @@
 #!/usr/bin/env python3
+"""Batch enrichment pipeline for YC startup records using Gemini.
+
+This variant processes companies in fixed-size batches (default: 10 rows per
+model call) to improve throughput while updating the source SQLite table and
+optionally writing a JSONL audit log.
+
+python yc_enrich_batch.py \
+    --db data/yc_companies.db \
+    --attribute product_vertical \
+    --query "Classify this company’s product vertical (e.g., robotics, video generation, social media, fintech, healthtech). Return one clear label." \
+    --sources-column product_vertical_sources \
+    --notes-column product_vertical_notes \
+    --where "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2024" \
+    --batch-size 10 \
+    --max-workers 16
+
 """
-Parallel enrichment pipeline for YC startup records.
 
-Given an existing SQLite database produced by ``yc_loader.py`` (or compatible
-schema), this script runs a Gemini-powered enrichment task for each startup and
-writes the results back into the target table (``yc_companies`` by default) while
-also appending a JSONL audit log (``yc_enriched_jsonl.jsonl`` by default).
-
-Quick start::
-
-    export GOOGLE_API_KEY="sk-..."  # or set GEMINI_API_KEY
-    python yc_enrich.py \
-        --db /Users/jaidevshah/agentic_search/data/yc_companies.db \
-        --attribute product_ \
-        --query "Summarise the product in 1 line, and find their largest investor" \
-        --sources-column founders_sources \
-        --max-workers 256
-
-
-    python yc_enrich.py \
-        --db data/yc_companies.db \
-        --attribute product_vertical \
-        --query "Classify this company’s product vertical (e.g., robotics, video generation, social media, fintech, healthtech). Return one clear label." \
-        --sources-column product_vertical_sources \
-        --notes-column product_vertical_notes \
-        --where "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2025" \
-        --max-workers 32
-
-
-    python yc_enrich.py \
-        --db data/yc_companies.db \
-        --attribute product_vertical \
-        --attribute open_roles \
-        --query "Classify this company’s product vertical (e.g., robotics, video generation, social media, fintech, healthtech). Return one clear label." \
-        --query "List the active job openings, using the startup’s careers page or recent public postings (e.g., Hacker News ‘Who’s Hiring?’). Return a comma-separated string; use an empty string if nothing is verifiable." \
-        --sources-column product_vertical_sources \
-        --sources-column open_roles_sources \
-        --notes-column product_vertical_notes \
-        --notes-column open_roles_notes \
-        --where "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2025" \
-        --max-workers 8
-
-
-    python yc_enrich.py \
-        --db data/yc_companies.db \
-        --attribute product_vertical \
-        --attribute open_roles \
-        --attribute latest_fundraising_amount \
-        --attribute latest_fundraising_date \
-        --attribute investors \
-        --query "Classify this company’s product vertical (e.g., robotics, video generation, social media, fintech, healthtech). Return one clear label." \
-        --query "List the active job openings, using the startup’s careers page or recent public postings (e.g., Hacker News ‘Who’s Hiring?’). Return a comma-separated string; use an empty string if nothing is verifiable." \
-        --query "Report the most recent fundraising amount (USD, integer). If unknown, return an empty string." \
-        --query "Provide the date of the most recent fundraising event in ISO format (YYYY-MM-DD). If unknown, return an empty string." \
-        --query "List the confirmed investors in the most recent round as a JSON array of strings (e.g., [\"Sequoia Capital\", \"YC Continuity\"]). Return an empty array if nothing is verifiable." \
-        --sources-column product_vertical_sources \
-        --sources-column open_roles_sources \
-        --sources-column latest_fundraising_amount_sources \
-        --sources-column latest_fundraising_date_sources \
-        --sources-column investors_sources \
-        --notes-column product_vertical_notes \
-        --notes-column open_roles_notes \
-        --notes-column latest_fundraising_amount_notes \
-        --notes-column latest_fundraising_date_notes \
-        --notes-column investors_notes \
-        --where "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2025 AND team_size >= 4;" \
-        --max-workers 4
-
-Adjust ``--table`` if your startups live outside ``yc_companies`` and use
-``--jsonl-out -`` to disable the audit log.
-"""
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import queue
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional
 import threading
 import time
-from dataclasses import dataclass
-from pathlib import Path
-from typing import Any, Dict, Iterable, Optional
 import re
 
 from google import genai
 from google.genai import types
 
-MODEL_NAME = "gemini-2.5-pro"
-DEFAULT_MAX_WORKERS = 8
+MODEL_NAME = "gemini-2.5-flash-lite"
+DEFAULT_BATCH_SIZE = 10
+DEFAULT_MAX_WORKERS = 4
 DEFAULT_JSONL_LOG = "/Users/jaidevshah/agentic_search/data/yc_enriched_jsonl.jsonl"
 DEFAULT_WHERE_CLAUSE = "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2023"
+DEFAULT_CLEAR_OUTSIDE_WHERE = True
 VALID_COLUMN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
-@dataclass
-class EnrichmentTask:
-    row_id: int
-    payload: Dict[str, Any]
 
 
 def load_api_key() -> str:
     api_key = os.environ.get("GOOGLE_API_KEY") or os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise RuntimeError(
-            "Set GOOGLE_API_KEY (preferred) or GEMINI_API_KEY in your environment before running enrichment."
+            "Set GOOGLE_API_KEY (preferred) or GEMINI_API_KEY before running enrichment."
         )
     return api_key.strip()
 
@@ -120,16 +62,16 @@ def ensure_column(conn: sqlite3.Connection, table: str, column: str) -> None:
 
 def validate_column_name(column: str, label: str) -> str:
     if not VALID_COLUMN_RE.fullmatch(column):
-        raise ValueError(f"{label} must be a valid SQL column identifier (letters, numbers, underscore): {column!r}")
+        raise ValueError(f"{label} must be a valid SQL column identifier: {column!r}")
     return column
 
 
 def normalise_option_list(
-    values: Optional[list[str]],
+    values: Optional[List[str]],
     count: int,
     label: str,
     parser: argparse.ArgumentParser,
-) -> list[Optional[str]]:
+) -> List[Optional[str]]:
     if not values:
         return [None] * count
     cleaned = [value.strip() for value in values]
@@ -150,6 +92,31 @@ def append_jsonl(jsonl_path: Optional[Path], lock: threading.Lock, record: Dict[
             handle.write("\n")
 
 
+def _clear_attribute_outside_where(
+    conn: sqlite3.Connection,
+    table: str,
+    attribute: str,
+    where_clause: str,
+    sources_column: Optional[str],
+    notes_column: Optional[str],
+    raw_column: Optional[str],
+) -> int:
+    assignments = [f"\"{attribute}\" = ''"]
+    if sources_column:
+        assignments.append(f"\"{sources_column}\" = '[]'")
+    if notes_column:
+        assignments.append(f"\"{notes_column}\" = ''")
+    if raw_column:
+        assignments.append(f'"{raw_column}" = NULL')
+    clause = (
+        f"UPDATE {table} SET {', '.join(assignments)} "
+        f"WHERE (CASE WHEN ({where_clause}) THEN 1 ELSE 0 END) = 0"
+    )
+    cursor = conn.execute(clause)
+    conn.commit()
+    return cursor.rowcount if cursor.rowcount is not None else 0
+
+
 def fetch_rows(
     conn: sqlite3.Connection,
     table: str,
@@ -157,9 +124,9 @@ def fetch_rows(
     limit: Optional[int],
     force: bool,
     where_clause: Optional[str],
-) -> list[Dict[str, Any]]:
+) -> List[Dict[str, Any]]:
     conn.row_factory = sqlite3.Row
-    conditions: list[str] = []
+    conditions: List[str] = []
     if where_clause:
         conditions.append(f"({where_clause})")
     if not force:
@@ -176,34 +143,54 @@ def fetch_rows(
     return [dict(row) for row in rows]
 
 
-def build_prompt(row: Dict[str, Any], enrichment_query: str, attribute: str) -> str:
-    row_json = json.dumps(row, ensure_ascii=False)
+def chunked(items: List[Dict[str, Any]], size: int) -> List[List[Dict[str, Any]]]:
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def build_batch_prompt(
+    rows: List[Dict[str, Any]],
+    attribute: str,
+    enrichment_query: str,
+) -> str:
     template = {
+        "row_id": 0,
         attribute: "",
         "sources": ["https://"],
         "confidence": "medium",
         "notes": "",
     }
+    payload = []
+    for row in rows:
+        payload.append(
+            {
+                "row_id": row["id"],
+                "company_name": row.get("company_name") or row.get("name"),
+                "website": row.get("website"),
+                "batch": row.get("batch"),
+                "record": row,
+            }
+        )
+    instruction = (
+        "You enrich YC startup records. For each input row, respond with an object "
+        "matching the provided schema.\n"
+        "Rules:\n"
+        "- Produce a JSON array with one object per input row.\n"
+        "- Copy the integer `row_id` exactly so we can map results back.\n"
+        "- Populate the '{attribute}' field as instructed: {query}.\n"
+        "- `sources` must only contain verified HTTPS URLs (<= 5).\n"
+        "- `confidence` must be one of: high, medium, low.\n"
+        "- `notes` is optional context; use an empty string if not needed.\n"
+        "- Return STRICT JSON with no extra commentary.\n"
+    ).format(attribute=attribute, query=enrichment_query)
     return (
-        "You are an enrichment agent helping populate structured attributes for startup records.\n"
-        "Always ground new facts with reputable sources and verify the startup data before answering.\n\n"
-        "Task: {task}\n"
-        "Startup record (JSON): {row}\n\n"
-        "Output requirements:\n"
-        "1. Respond with a SINGLE valid JSON object matching this schema: {template}\n"
-        "2. The object must contain exactly these keys: '{attribute}', sources, confidence, notes.\n"
-        "3. '{attribute}' should be a string (use an empty string if nothing can be verified).\n"
-        "4. 'sources' must be an array of verified HTTPS URLs (deduplicate, keep <=5).\n"
-        "5. 'confidence' must be one of: high, medium, low.\n"
-        "6. 'notes' is a brief string explaining the decision (use an empty string when nothing to add).\n"
-        "7. Do not wrap the JSON in markdown, prose, bullet lists, or extra text.\n"
-        "8. Before replying, ensure the JSON parses without modification (e.g., json.loads).\n"
-        "9. If nothing can be found, return empty string values but still provide the JSON object.\n"
-    ).format(task=enrichment_query, row=row_json, template=json.dumps(template), attribute=attribute)
+        f"{instruction}\n"
+        f"Expected schema: {json.dumps(template, ensure_ascii=False)}\n"
+        f"Input rows: {json.dumps(payload, ensure_ascii=False)}"
+    )
 
 
 def join_candidate_text(response: Any) -> str:
-    fragments: list[str] = []
+    fragments: List[str] = []
     for candidate in getattr(response, "candidates", []) or []:
         content = getattr(candidate, "content", None)
         for part in getattr(content, "parts", []) or []:
@@ -241,13 +228,15 @@ def _extract_json_payload(payload: str) -> str:
     return stripped
 
 
-def call_model(api_key: str, prompt: str, temperature: float, use_grounding: bool) -> Dict[str, Any]:
+def call_model(
+    api_key: str,
+    prompt: str,
+    temperature: float,
+    use_grounding: bool,
+) -> List[Dict[str, Any]]:
     client = genai.Client(api_key=api_key)
     tools = [types.Tool(google_search=types.GoogleSearch())] if use_grounding else None
-    config = types.GenerateContentConfig(
-        tools=tools,
-        temperature=temperature,
-    )
+    config = types.GenerateContentConfig(tools=tools, temperature=temperature)
     response = client.models.generate_content(
         model=MODEL_NAME,
         contents=prompt,
@@ -259,10 +248,10 @@ def call_model(api_key: str, prompt: str, temperature: float, use_grounding: boo
     if not payload:
         raise ValueError("Model returned no text payload")
     cleaned = _extract_json_payload(payload)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"Model response was not valid JSON: {payload}") from exc
+    data = json.loads(cleaned)
+    if not isinstance(data, list):
+        raise ValueError("Expected model to return a JSON array")
+    return data
 
 
 def update_row(
@@ -281,7 +270,7 @@ def update_row(
     connection = sqlite3.connect(db_path)
     try:
         assignments = [f'"{attribute}" = ?']
-        params: list[Any] = [value or ""]
+        params: List[Any] = [value or ""]
         if sources_column:
             assignments.append(f'"{sources_column}" = ?')
             params.append(json.dumps(list(sources or []), ensure_ascii=False))
@@ -299,33 +288,46 @@ def update_row(
         connection.close()
 
 
-def worker(
-    task_queue: "queue.Queue[EnrichmentTask | None]",
-    db_path: Path,
-    table: str,
+def process_batch(
+    batch_rows: List[Dict[str, Any]],
     attribute: str,
-    enrichment_query: str,
+    query: str,
     api_key: str,
     temperature: float,
     use_grounding: bool,
+    db_path: Path,
+    table: str,
     sources_column: Optional[str],
     notes_column: Optional[str],
     raw_column: Optional[str],
-    progress: Dict[str, int],
-    progress_lock: threading.Lock,
     jsonl_path: Optional[Path],
     jsonl_lock: threading.Lock,
-) -> None:
-    while True:
-        task = task_queue.get()
-        if task is None:  # sentinel
-            task_queue.task_done()
-            break
-        row_id = task.row_id
-        row = task.payload
-        prompt = build_prompt(row, enrichment_query, attribute)
-        try:
-            result = call_model(api_key, prompt, temperature, use_grounding)
+) -> Dict[str, int]:
+    processed = len(batch_rows)
+    success = 0
+    failed = 0
+
+    prompt = build_batch_prompt(batch_rows, attribute, query)
+    try:
+        results = call_model(api_key, prompt, temperature, use_grounding)
+        mapping: Dict[int, Dict[str, Any]] = {}
+        for item in results:
+            if not isinstance(item, dict) or "row_id" not in item:
+                raise ValueError("Each result must be an object containing 'row_id'.")
+            mapping[int(item["row_id"])] = item
+
+        expected_ids = {int(row["id"]) for row in batch_rows}
+        if set(mapping.keys()) != expected_ids:
+            missing = expected_ids - set(mapping.keys())
+            extra = set(mapping.keys()) - expected_ids
+            raise ValueError(
+                f"Model response mismatch; missing: {sorted(missing)}, extra: {sorted(extra)}"
+            )
+
+        timestamp = time.time()
+        for row in batch_rows:
+            row_id = int(row["id"])
+            result = mapping[row_id]
             value_obj = result.get(attribute)
             if isinstance(value_obj, str):
                 value = value_obj
@@ -334,12 +336,11 @@ def worker(
             else:
                 value = json.dumps(value_obj, ensure_ascii=False)
 
-            sources = result.get("sources")
+            sources = result.get("sources") if isinstance(result.get("sources"), list) else None
             notes_obj = result.get("notes")
-            if isinstance(notes_obj, str) or notes_obj is None:
-                notes = notes_obj
-            else:
-                notes = json.dumps(notes_obj, ensure_ascii=False)
+            notes = notes_obj if isinstance(notes_obj, str) else json.dumps(notes_obj, ensure_ascii=False) if notes_obj not in (None, "") else ""
+            raw_json = result
+
             update_row(
                 db_path=db_path,
                 table=table,
@@ -347,36 +348,32 @@ def worker(
                 row_id=row_id,
                 value=value,
                 sources_column=sources_column,
-                sources=sources if isinstance(sources, list) else None,
+                sources=sources,
                 notes_column=notes_column,
                 notes=notes,
                 raw_column=raw_column,
-                raw_json=result,
+                raw_json=raw_json,
             )
-            with progress_lock:
-                progress["success"] += 1
-            log_record = dict(row)  # copy original columns
+
+            log_record = dict(row)
             log_record[attribute] = value
-            if sources_column and isinstance(sources, list):
+            if sources_column and sources is not None:
                 log_record[sources_column] = sources
             if notes_column:
-                log_record[notes_column] = notes or ""
+                log_record[notes_column] = notes
             if raw_column:
-                log_record[raw_column] = result
+                log_record[raw_column] = raw_json
+            log_record.setdefault("_batch_timestamp", timestamp)
             append_jsonl(jsonl_path, jsonl_lock, log_record)
-        except Exception as exc:  # noqa: BLE001
-            with progress_lock:
-                progress["failed"] += 1
-            print(f"[worker] Row {row_id} failed: {exc}", flush=True)
+            success += 1
+    except Exception as exc:  # noqa: BLE001
+        failed = processed
+        for row in batch_rows:
             error_record = dict(row)
             error_record.setdefault(attribute, row.get(attribute, ""))
             error_record["_enrichment_error"] = str(exc)
             append_jsonl(jsonl_path, jsonl_lock, error_record)
-        finally:
-            with progress_lock:
-                progress["processed"] += 1
-            task_queue.task_done()
-            time.sleep(0.2)  # light throttling to respect rate limits
+    return {"processed": processed, "success": success, "failed": failed}
 
 
 def run_enrichment_task(
@@ -391,6 +388,8 @@ def run_enrichment_task(
     limit: Optional[int],
     force: bool,
     where_clause: Optional[str],
+    clear_outside_where: bool,
+    batch_size: int,
     max_workers: int,
     temperature: float,
     use_grounding: bool,
@@ -406,56 +405,66 @@ def run_enrichment_task(
             ensure_column(conn, table, notes_column)
         if raw_column:
             ensure_column(conn, table, raw_column)
+        if where_clause and clear_outside_where:
+            cleared = _clear_attribute_outside_where(
+                conn,
+                table,
+                attribute,
+                where_clause,
+                sources_column,
+                notes_column,
+                raw_column,
+            )
+            if cleared:
+                print(
+                    f"Blanked '{attribute}' for {cleared} rows outside the WHERE filter before enrichment."
+                )
         rows = fetch_rows(conn, table, attribute, limit, force, where_clause)
 
     if not rows:
         print(f"No rows require enrichment for column '{attribute}'. Skipping.")
         return
 
+    batches = chunked(rows, batch_size)
     print(
-        f"Queued {len(rows):,} rows from '{table}' for enrichment of column '{attribute}'."
+        f"Queued {len(rows):,} rows across {len(batches)} batches (size {batch_size}) "
+        f"for enrichment of column '{attribute}'."
     )
 
-    task_queue: "queue.Queue[EnrichmentTask | None]" = queue.Queue()
     progress = {"processed": 0, "success": 0, "failed": 0}
     progress_lock = threading.Lock()
 
-    workers: list[threading.Thread] = []
-    for _ in range(max(1, max_workers)):
-        thread = threading.Thread(
-            target=worker,
-            kwargs={
-                "task_queue": task_queue,
-                "db_path": db_path,
-                "table": table,
-                "attribute": attribute,
-                "enrichment_query": query,
-                "api_key": api_key,
-                "temperature": temperature,
-                "use_grounding": use_grounding,
-                "sources_column": sources_column,
-                "notes_column": notes_column,
-                "raw_column": raw_column,
-                "progress": progress,
-                "progress_lock": progress_lock,
-                "jsonl_path": jsonl_path,
-                "jsonl_lock": jsonl_lock,
-            },
-            daemon=True,
+    def submit_batch(batch_rows: List[Dict[str, Any]]):
+        result = process_batch(
+            batch_rows=batch_rows,
+            attribute=attribute,
+            query=query,
+            api_key=api_key,
+            temperature=temperature,
+            use_grounding=use_grounding,
+            db_path=db_path,
+            table=table,
+            sources_column=sources_column,
+            notes_column=notes_column,
+            raw_column=raw_column,
+            jsonl_path=jsonl_path,
+            jsonl_lock=jsonl_lock,
         )
-        thread.start()
-        workers.append(thread)
+        with progress_lock:
+            for key, value in result.items():
+                progress[key] += value
+        if result["failed"]:
+            print(
+                f"[batch] Failed rows {', '.join(str(row['id']) for row in batch_rows)}"  # noqa: RUF001
+            )
 
-    for row in rows:
-        task_queue.put(EnrichmentTask(row_id=row["id"], payload=row))
-
-    for _ in workers:
-        task_queue.put(None)
-
-    task_queue.join()
-
-    for thread in workers:
-        thread.join()
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(submit_batch, batch) for batch in batches]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"[batch] Unexpected error: {exc}")
 
     print(
         "Completed enrichment for '{attribute}': {processed:,} processed, {success:,} succeeded, {failed:,} failed.".format(
@@ -466,11 +475,9 @@ def run_enrichment_task(
         )
     )
 
-    return
-
 
 def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
-    parser = argparse.ArgumentParser(description="Enrich YC startups using Gemini")
+    parser = argparse.ArgumentParser(description="Batch enrich YC startups using Gemini")
     parser.add_argument("--db", required=True, help="Path to the SQLite database (e.g. data/yc_db.db)")
     parser.add_argument(
         "--attribute",
@@ -520,8 +527,26 @@ def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
             "Pass an empty string to disable."
         ),
     )
+    parser.add_argument(
+        "--no-clear-outside-where",
+        dest="clear_outside_where",
+        action="store_false",
+        help="Do not blank the attribute for rows that fail the WHERE clause filter.",
+    )
+    parser.set_defaults(clear_outside_where=DEFAULT_CLEAR_OUTSIDE_WHERE)
     parser.add_argument("--limit", type=int, help="Process only the first N applicable startups")
-    parser.add_argument("--max-workers", type=int, default=DEFAULT_MAX_WORKERS, help="Number of parallel Gemini calls")
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Number of rows to send per Gemini request (default: 10)",
+    )
+    parser.add_argument(
+        "--max-workers",
+        type=int,
+        default=DEFAULT_MAX_WORKERS,
+        help="Number of concurrent Gemini calls (default: 4)",
+    )
     parser.add_argument("--temperature", type=float, default=0.0, help="Model temperature")
     parser.add_argument(
         "--force",
@@ -547,9 +572,12 @@ def main() -> None:
 
     if args.limit is not None and args.limit <= 0:
         raise ValueError("--limit must be a positive integer when provided")
+    if args.batch_size <= 0:
+        raise ValueError("--batch-size must be a positive integer")
+    if args.max_workers <= 0:
+        raise ValueError("--max-workers must be a positive integer")
 
     api_key = load_api_key()
-
     table = validate_column_name(args.table.strip(), "--table")
 
     attributes = [validate_column_name(attr.strip(), "--attribute") for attr in args.attribute]
@@ -595,6 +623,8 @@ def main() -> None:
             limit=args.limit,
             force=args.force,
             where_clause=where_clause,
+            clear_outside_where=args.clear_outside_where,
+            batch_size=args.batch_size,
             max_workers=args.max_workers,
             temperature=args.temperature,
             use_grounding=args.use_grounding,
