@@ -12,8 +12,8 @@ Example::
         --attribute investors \
         --query "Classify this company’s product vertical (e.g., robotics, video generation, social media, fintech, healthtech). Return one clear label." \
         --query "List the active job openings, using the startup’s careers page or recent public postings (e.g., Hacker News 'Who’s Hiring?'). Return a comma-separated string; use an empty string if nothing is verifiable." \
-        --query "Report the most recent fundraising amount (USD, integer). If unknown, return an empty string." \
-        --query "Provide the date of the most recent fundraising event in ISO format (YYYY-MM-DD). If unknown, return an empty string." \
+        --query "Report the most recent fundraising amount (USD, integer). Use several searches, blogs, tweets, crunchbase, etc. Only if at the end it is unknown, return an empty string." \
+        --query "Provide the date of the most recent fundraising event in ISO format (YYYY-MM-DD). Use several searches, blogs, tweets, crunchbase, etc. If unknown, return an empty string." \
         --query "List the confirmed investors in the most recent round as a JSON array of strings (e.g., [\"Sequoia Capital\", \"YC Continuity\"]). Return an empty array if nothing is verifiable." \
         --sources-column product_vertical_sources \
         --sources-column open_roles_sources \
@@ -25,7 +25,7 @@ Example::
         --notes-column latest_fundraising_amount_notes \
         --notes-column latest_fundraising_date_notes \
         --notes-column investors_notes \
-        --where "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2025 AND team_size >= 4" \
+        --where "batch IS NOT NULL AND CAST(substr(batch, -4) AS INTEGER) >= 2025" \
         --max-workers 32
 """
 
@@ -539,7 +539,7 @@ def parse_args() -> tuple[argparse.Namespace, argparse.ArgumentParser]:
     parser.add_argument(
         "--max-wait-seconds",
         type=float,
-        default=120.0,
+        default=600.0,
         help="Maximum time in seconds to wait for all threads before exiting early (default: 120)",
     )
     args = parser.parse_args()
