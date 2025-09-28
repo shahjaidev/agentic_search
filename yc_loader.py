@@ -2,6 +2,18 @@
 """
 Fetch YC OSS API company data and sync it into a local SQLite database.
 
+Args (CLI flags):
+  --out PATH          Path for the debug JSONL dump (default: yc_db.jsonl).
+  --skip-jsonl        Skip writing the debug JSONL altogether.
+  --from-jsonl PATH   Load data from an existing JSONL file instead of fetching.
+  --also LIST [...]   Optional extra subsets to download (e.g. top, hiring).
+  --save-meta         Persist meta.json alongside the JSONL for provenance.
+  --sqlite-url URL    Override the SQLite database URL (default: sqlite:///data/yc_db.db).
+  --limit N           Only process the first N companies (useful for sampling).
+
+Example:
+  python yc_loader.py --also top hiring --save-meta --limit 1000 --sqlite-url sqlite:///data/yc_custom.db
+
 By default the script downloads the latest "all" companies list, stores a
 debugging JSONL snapshot, and mirrors the records into SQLite. You can reuse
 an existing JSONL dump instead of hitting the network with ``--from-jsonl``.
@@ -299,13 +311,27 @@ def main() -> None:
         default=None,
         help=f"Optional DATABASE_URL override (defaults to env/DATABASE_URL or {DEFAULT_SQLITE_URL})",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="Process only the first N companies (applies to the primary list)",
+    )
     args = parser.parse_args()
+
+    if args.limit is not None and args.limit <= 0:
+        parser.error("--limit must be a positive integer")
 
     if args.from_jsonl:
         jsonl_path = Path(args.from_jsonl)
         if not jsonl_path.exists():
             raise FileNotFoundError(f"Could not find JSONL input at {jsonl_path}")
         all_companies = load_jsonl(jsonl_path)
+        if args.limit is not None:
+            original_count = len(all_companies)
+            all_companies = all_companies[: args.limit]
+            print(
+                f"Applied limit: taking first {len(all_companies):,} of {original_count:,} companies from {jsonl_path}")
         meta = None
         print(f"Loaded {len(all_companies):,} companies from {jsonl_path}")
     else:
@@ -323,6 +349,11 @@ def main() -> None:
         all_companies = fetch_json(all_url)
         if not isinstance(all_companies, list):
             raise RuntimeError("Expected a JSON array for companies")
+
+        if args.limit is not None:
+            original_count = len(all_companies)
+            all_companies = all_companies[: args.limit]
+            print(f"Applied limit: taking first {len(all_companies):,} of {original_count:,} fetched companies")
 
         if not args.skip_jsonl:
             write_jsonl(all_companies, jsonl_path)
