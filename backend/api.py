@@ -23,7 +23,7 @@ from backend.schemas import (
 )
 from backend.service_gemini import get_gemini_client
 
-TABLE_NAME = "yc_companies"
+TABLE_NAME = "polymarket_markets"
 
 
 def build_history_summary(conversation: models.Conversation) -> List[dict[str, str]]:
@@ -194,7 +194,7 @@ async def chat(request: ChatRequest, session: Session = Depends(get_session)):
 
     response_payload = MessagePayload(
         facts=followup_facts,
-        suggested_sql_columns=updated_columns,
+        suggested_sql_columns=[],
         enrichment_hint=gemini_payload.enrichment_hint,
         sql=plan.sql if plan else None,
         sql_rows=sql_results,
@@ -257,5 +257,3 @@ def build_sql_summary(plan: SqlPlan, execution: SqlExecutionResult) -> str:
         remaining = execution.row_count - len(preview_rows)
         lines.append(f"…and {remaining} more rows.")
     return "\n".join(lines)
-
-

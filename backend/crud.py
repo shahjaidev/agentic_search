@@ -9,6 +9,7 @@ from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from backend import models
+from backend.database import data_connection
 
 
 def get_conversation(session: Session, conversation_id: Optional[str]) -> Optional[models.Conversation]:
@@ -116,13 +117,14 @@ def serialize_messages(messages: Iterable[models.Message]) -> list[dict]:
 
 
 def list_columns(session: Session, table_name: str) -> list[str]:
-    result = session.execute(text(f"PRAGMA table_info({table_name})"))
-    return [row[1] for row in result]
+    with data_connection() as conn:
+        result = conn.execute(text(f"PRAGMA table_info({table_name})"))
+        return [row[1] for row in result]
 
 
 def execute_sql(session: Session, sql: str, params: dict | None = None) -> list[dict]:
     params = params or {}
-    result = session.execute(text(sql), params)
-    return [dict(row._mapping) for row in result]
-
+    with data_connection() as conn:
+        result = conn.execute(text(sql), params)
+        return [dict(row._mapping) for row in result]
 

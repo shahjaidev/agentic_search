@@ -17,7 +17,11 @@ class Settings(BaseSettings):
     )
     database_url: str = Field(
         default="sqlite:///yc_custom.db",
-        description="SQLAlchemy database URL for SQLite storage.",
+        description="Primary SQLAlchemy database URL for application state.",
+    )
+    polymarket_database_url: str = Field(
+        default="sqlite:///polymarket/data/polymarket_markets.db",
+        description="Read-only SQLAlchemy database URL for Polymarket markets.",
     )
     gemini_model: str = Field(
         default="models/gemini-2.5-flash",
@@ -35,5 +39,3 @@ def get_settings() -> Settings:
 
 
 settings = get_settings()
-
-

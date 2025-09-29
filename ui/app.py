@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import time
 import uuid
 from typing import Any, Dict, List
@@ -9,7 +10,7 @@ from typing import Any, Dict, List
 import requests
 import streamlit as st
 
-API_BASE_URL = "http://localhost:8000"
+API_BASE_URL = "http://localhost:8001"
 CUSTOM_CSS = """
 <style>
 :root {
@@ -153,6 +154,87 @@ body {
     color: #bae6fd;
 }
 
+[data-testid="stDeployButton"] {
+    display: none !important;
+}
+
+div[data-testid="stToolbar"] {
+    display: none !important;
+}
+
+
+.table-block {
+    margin-top: 0.75rem;
+    border-radius: 1.1rem;
+    border: 1px solid rgba(59, 130, 246, 0.28);
+    background: rgba(15, 23, 42, 0.78);
+    box-shadow: 0 18px 44px rgba(15, 23, 42, 0.45);
+    overflow: hidden;
+    width: 100%;
+}
+
+.table-caption {
+    display: block;
+    padding: 0.9rem 1.2rem 0 1.2rem;
+    color: rgba(191, 219, 254, 0.86);
+    font-size: 0.85rem;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+}
+
+
+.table-container {
+    overflow-x: auto;
+    padding: 0.6rem 1.2rem 1.1rem 1.2rem;
+    width: 100%;
+}
+
+
+.table-container table {
+    width: 100%;
+    min-width: 720px;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 0.92rem;
+}
+
+.table-container thead th {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    background: rgba(37, 99, 235, 0.32);
+    color: #f8fafc;
+    text-transform: none;
+    font-weight: 600;
+}
+
+.table-container th,
+.table-container td {
+    padding: 0.65rem 0.9rem;
+    border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+    text-align: left;
+    color: #f8fafc;
+    white-space: nowrap;
+}
+
+.table-container td {
+    font-weight: 400;
+    white-space: normal;
+    word-break: break-word;
+}
+
+.table-container tbody tr:nth-child(odd) {
+    background: rgba(15, 23, 42, 0.68);
+}
+
+.table-container tbody tr:nth-child(even) {
+    background: rgba(15, 23, 42, 0.58);
+}
+
+.table-container tbody tr:hover {
+    background: rgba(59, 130, 246, 0.28);
+}
+
 [data-testid="stChatMessage"] {
     margin-bottom: 1.2rem;
 }
@@ -206,8 +288,8 @@ def render_header() -> None:
     st.markdown(
         """
         <div class="hero-card">
-            <h1>Agentic Search</h1>
-            <p>Ask questions, capture evidence, and collect structured hints—all in one conversational thread.</p>
+            <h1>SI</h1>
+            <p>providing perfect context for your agentic research tasks</p>
         </div>
         """,
         unsafe_allow_html=True,
@@ -271,6 +353,8 @@ def display_payload(payload: Dict[str, Any] | None) -> None:
     if not payload:
         return
 
+    summary = payload.get("sql_summary") or payload.get("assistant_message")
+
     if facts := payload.get("facts"):
         facts_markup = "".join(
             f"<li><strong>{fact.get('source', 'source')}</strong> — {fact.get('text', '')}</li>" for fact in facts
@@ -287,6 +371,43 @@ def display_payload(payload: Dict[str, Any] | None) -> None:
             unsafe_allow_html=True,
         )
 
+    rows = payload.get("sql_rows")
+    if rows:
+        caption = None
+        if summary:
+            caption = summary
+            summary = ""
+        st.markdown(render_sql_table(rows, caption=caption), unsafe_allow_html=True)
+        return
+
+    if summary:
+        st.markdown(render_bubble(summary, "assistant-bubble"), unsafe_allow_html=True)
+
+
+def render_sql_table(rows: List[Dict[str, Any]], caption: str | None = None) -> str:
+    if not rows:
+        return ""
+
+    columns = [col for col in rows[0].keys() if col.lower() != "description"]
+    header_cells = "".join(f"<th>{html.escape(str(col))}</th>" for col in columns)
+    body_rows = []
+    for row in rows:
+        cells = "".join(
+            f"<td>{html.escape(str(row.get(col, '')))}</td>" for col in columns
+        )
+        body_rows.append(f"<tr>{cells}</tr>")
+    body_html = "".join(body_rows)
+    caption_html = f"<span class='table-caption'>{html.escape(caption)}</span>" if caption else ""
+    return (
+        "<div class='table-block'>"
+        + caption_html
+        + "<div class='table-container'><table><thead><tr>"
+        + header_cells
+        + "</tr></thead><tbody>"
+        + body_html
+        + "</tbody></table></div></div>"
+    )
+
 
 def render_messages(show_debug: bool = False) -> None:
     avatar_lookup = {"user": "🙂", "assistant": "🤖"}
@@ -298,6 +419,8 @@ def render_messages(show_debug: bool = False) -> None:
         pending = message.get("pending", False)
         stream_chunks = message.get("stream_chunks") or []
         bubble_class = "user-bubble" if role == "user" else "assistant-bubble"
+        has_sql_rows = bool(payload.get("sql_rows"))
+        summary_text = (payload.get("sql_summary") or payload.get("assistant_message") or "").strip()
 
         with st.chat_message(role, avatar=avatar_lookup.get(role, "💬")):
             if pending:
@@ -317,7 +440,13 @@ def render_messages(show_debug: bool = False) -> None:
                     render_debug_block(payload)
                 continue
 
-            st.markdown(render_bubble(content, bubble_class), unsafe_allow_html=True)
+            should_render_bubble = True
+            if role == "assistant" and has_sql_rows:
+                if not content.strip() or content.strip() == summary_text:
+                    should_render_bubble = False
+
+            if should_render_bubble:
+                st.markdown(render_bubble(content, bubble_class), unsafe_allow_html=True)
             display_payload(payload)
             if show_debug and role == "assistant":
                 render_debug_block(payload)
@@ -434,5 +563,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-

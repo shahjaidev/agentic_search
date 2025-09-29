@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List
 
 import google.generativeai as genai
@@ -11,11 +12,22 @@ import google.generativeai as genai
 from backend.config import settings
 from backend.schemas import SqlPlan
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+MARKET_CATEGORIZATION_PATH = PROJECT_ROOT / "polymarket" / "market_categorization.md"
+
+try:
+    TAXONOMY_REFERENCE = MARKET_CATEGORIZATION_PATH.read_text(encoding="utf-8")
+except OSError:  # pragma: no cover - defensive in case file missing
+    TAXONOMY_REFERENCE = ""
+
 PROMPT_TEMPLATE = """
-You are a data assistant working with a SQLite table named yc_companies.
+You are a data assistant working with a SQLite table named polymarket_markets.
 Columns available: {columns}
 Recent conversation turns:
 {history}
+
+Taxonomy reference for market categorization:
+{taxonomy}
 
 When answering the user, you must:
 - Produce a SQL SELECT statement that will answer the user's question whenever it is possible with the available columns.
@@ -23,6 +35,10 @@ When answering the user, you must:
 - Only omit SQL as a last resort if the question cannot be answered with the current columns and aggregations or other sql operations; in that case, set sql to an empty string and recommend enrichment.
 - Suggest additional columns in suggested_sql_columns only if they would truly help.
 - If enrichment is needed, explicitly set enrichment_hint with the column name and reason.
+- When the user references a specific Polymarket market or question, identify the best matching category codes (market_category, market_category_l1, market_category_l2, market_category_l3) using the taxonomy above. Use those levels to find related markets by matching on the most specific available level (prefer L3, then L2, then L1).
+- When the user references a specific Polymarket market or question, identify the best matching category codes (market_category, market_category_l1, market_category_l2, market_category_l3) using the taxonomy above. Use those levels to find related markets by matching on the most specific available level (prefer L3, then L2, then L1).
+- Extract the key entity names, people, organizations, or events mentioned by the user (or contained in the anchor market) and include case-insensitive LIKE filters on question and description so returned markets explicitly reference those same entities. Combine category matching with these keyword filters to avoid unrelated results.
+- Any SQL you generate must cap results to 30 rows or fewer using LIMIT 30 (or a smaller number when appropriate).
 
 Return JSON with keys:
 - assistant_message: conversational answer (string)
@@ -33,45 +49,42 @@ Return JSON with keys:
 - sql_variables: dictionary of parameters to plug into the SQL query (optional)
 
 Example 1:
-User question: "Which is the largest batch of YC, and how many companies are in each industry in this batch?"
+User question: "I'm looking at the market 'Netanyahu out by 2025'. What other markets in the same detailed category should I compare it with?"
 SQL to run:
-WITH batch_counts AS (
-    SELECT batch, COUNT(*) AS company_count
-    FROM yc_companies
-    GROUP BY batch
-    ORDER BY company_count DESC
-    LIMIT 1
-)
-SELECT c.industry, COUNT(*) AS companies_in_industry
-FROM yc_companies c
-JOIN batch_counts bc ON c.batch = bc.batch
-GROUP BY c.industry
-ORDER BY companies_in_industry DESC;
+SELECT market_id, question, end_date_iso, market_category, market_category_l1_name, market_category_l2_name, market_category_l3_name
+FROM polymarket_markets
+WHERE market_category_l3_name = 'Government Officials'
+  AND market_id != 'netanyahu-out-in-2025-492'
+  AND (
+        LOWER(question) LIKE '%netanyahu%'
+        OR LOWER(description) LIKE '%netanyahu%'
+      )
+ORDER BY end_date_iso
+LIMIT 30;
 
 Example 2:
-User question: "Find all companies in the Virtual or Augmented Reality space that raised money in 2025 and are hiring."
+User question: "List markets similar to the Fed rate cuts market." 
 SQL to run:
-SELECT name, industries, isHiring, latest_fundraising_date
-FROM yc_companies
-WHERE isHiring = 1
-  AND latest_fundraising_date LIKE '2025%'
+SELECT market_id, question, rewards, end_date_iso
+FROM polymarket_markets
+WHERE market_category_l2_name = 'Interest Rates'
   AND (
-        industries LIKE '%Virtual Reality%'
-        OR industries LIKE '%Augmented Reality%'
-        OR long_description LIKE '%virtual reality%'
-        OR long_description LIKE '%augmented reality%'
-        OR one_liner LIKE '%virtual reality%'
-        OR one_liner LIKE '%augmented reality%'
-      );
+        LOWER(question) LIKE '%fed%'
+        OR LOWER(description) LIKE '%fed%'
+        OR LOWER(question) LIKE '%federal reserve%'
+        OR LOWER(description) LIKE '%federal reserve%'
+      )
+ORDER BY end_date_iso
+LIMIT 30;
 
 Example 3:
-User question: "What is the average latest fundraising amount for Summer 2025 companies vs Winter 2025 companies?"
+User question: "How many markets per primary category are currently accepting orders?"
 SQL to run:
-SELECT batch, AVG(CAST(latest_fundraising_amount AS REAL)) AS avg_latest_fundraising
-FROM yc_companies
-WHERE latest_fundraising_amount IS NOT NULL
-  AND batch IN ('Summer 2025', 'Winter 2025')
-GROUP BY batch;
+SELECT market_category_l1_name AS category, COUNT(*) AS markets_accepting_orders
+FROM polymarket_markets
+WHERE accepting_orders = 1
+GROUP BY market_category_l1_name
+ORDER BY markets_accepting_orders DESC;
 
 Always return valid JSON.
 """
@@ -118,7 +131,11 @@ class GeminiClient:
             content = item.get("content", "")
             formatted_history_lines.append(f"- {role}: {content}")
         formatted_history = "\n".join(formatted_history_lines)
-        prompt = PROMPT_TEMPLATE.format(columns=", ".join(columns), history=formatted_history or "(no prior messages)")
+        prompt = PROMPT_TEMPLATE.format(
+            columns=", ".join(columns),
+            history=formatted_history or "(no prior messages)",
+            taxonomy=TAXONOMY_REFERENCE or "(taxonomy reference unavailable)",
+        )
         full_prompt = f"{prompt}\nUser question: {user_message}"
 
         try:
@@ -197,6 +214,12 @@ class GeminiClient:
             self.logger.warning("Gemini returned non-JSON payload; using raw text fallback")
             parsed = {"assistant_message": payload_text}
 
+        if isinstance(parsed, list):
+            parsed = parsed[0] if parsed and isinstance(parsed[0], dict) else {"assistant_message": payload_text}
+
+        if not isinstance(parsed, dict):
+            parsed = {"assistant_message": str(parsed)}
+
         if not parsed.get("assistant_message") and not allow_empty:
             self.logger.warning("Gemini response missing assistant_message; using fallback")
             return self._fallback_response(user_message, columns)
@@ -234,5 +257,3 @@ def get_gemini_client() -> GeminiClient:
     """Convenience accessor for dependency injection."""
 
     return GeminiClient()
-
-
