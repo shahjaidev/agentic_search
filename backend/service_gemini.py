@@ -14,13 +14,13 @@ from backend.schemas import SqlPlan
 PROMPT_TEMPLATE = """
 You are a data assistant working with a SQLite table named yc_companies.
 Columns available: {columns}
-Chat history (most recent first):
+Recent conversation turns:
 {history}
 
 When answering the user, you must:
 - Produce a SQL SELECT statement that will answer the user's question whenever it is possible with the available columns.
-- Use aggregations such as COUNT(*) or SUM(...) when the question asks for totals.
-- Only omit SQL if the question cannot be answered with the current columns; in that case, set sql to an empty string and recommend enrichment.
+- Carefully consider if the question can be answered with the current columns and aggregations such as COUNT(*), SUM(...), AVG(...), MIN(...), and MAX(...) etc. when they can help answer the question.
+- Only omit SQL as a last resort if the question cannot be answered with the current columns and aggregations or other sql operations; in that case, set sql to an empty string and recommend enrichment.
 - Suggest additional columns in suggested_sql_columns only if they would truly help.
 - If enrichment is needed, explicitly set enrichment_hint with the column name and reason.
 
@@ -31,6 +31,47 @@ Return JSON with keys:
 - enrichment_hint: optional object with 'attribute' and 'reason' if data is missing
 - sql: SQL SELECT statement using available columns to answer the question if possible
 - sql_variables: dictionary of parameters to plug into the SQL query (optional)
+
+Example 1:
+User question: "Which is the largest batch of YC, and how many companies are in each industry in this batch?"
+SQL to run:
+WITH batch_counts AS (
+    SELECT batch, COUNT(*) AS company_count
+    FROM yc_companies
+    GROUP BY batch
+    ORDER BY company_count DESC
+    LIMIT 1
+)
+SELECT c.industry, COUNT(*) AS companies_in_industry
+FROM yc_companies c
+JOIN batch_counts bc ON c.batch = bc.batch
+GROUP BY c.industry
+ORDER BY companies_in_industry DESC;
+
+Example 2:
+User question: "Find all companies in the Virtual or Augmented Reality space that raised money in 2025 and are hiring."
+SQL to run:
+SELECT name, industries, isHiring, latest_fundraising_date
+FROM yc_companies
+WHERE isHiring = 1
+  AND latest_fundraising_date LIKE '2025%'
+  AND (
+        industries LIKE '%Virtual Reality%'
+        OR industries LIKE '%Augmented Reality%'
+        OR long_description LIKE '%virtual reality%'
+        OR long_description LIKE '%augmented reality%'
+        OR one_liner LIKE '%virtual reality%'
+        OR one_liner LIKE '%augmented reality%'
+      );
+
+Example 3:
+User question: "What is the average latest fundraising amount for Summer 2025 companies vs Winter 2025 companies?"
+SQL to run:
+SELECT batch, AVG(CAST(latest_fundraising_amount AS REAL)) AS avg_latest_fundraising
+FROM yc_companies
+WHERE latest_fundraising_amount IS NOT NULL
+  AND batch IN ('Summer 2025', 'Winter 2025')
+GROUP BY batch;
 
 Always return valid JSON.
 """
@@ -71,10 +112,12 @@ class GeminiClient:
         if not self.enabled or self.model is None:
             return self._fallback_response(user_message, columns)
 
-        formatted_history = "\n".join(
-            f"- {item['role']}: {item['content']}"
-            for item in (history or [])
-        )
+        formatted_history_lines = []
+        for item in history or []:
+            role = item.get("role", "assistant")
+            content = item.get("content", "")
+            formatted_history_lines.append(f"- {role}: {content}")
+        formatted_history = "\n".join(formatted_history_lines)
         prompt = PROMPT_TEMPLATE.format(columns=", ".join(columns), history=formatted_history or "(no prior messages)")
         full_prompt = f"{prompt}\nUser question: {user_message}"
 
@@ -106,10 +149,18 @@ class GeminiClient:
             }
 
         context = context or {}
-        formatted_history = "\n".join(
-            f"- {item['role']}: {item['content']}"
-            for item in (history or [])
-        )
+        formatted_history_lines = []
+        for item in history or []:
+            role = item.get("role", "assistant")
+            content = item.get("content", "")
+            formatted_history_lines.append(f"- {role}: {content}")
+        formatted_history = "\n".join(formatted_history_lines)
+        formatted_history_lines = []
+        for item in history or []:
+            role = item.get("role", "assistant")
+            content = item.get("content", "")
+            formatted_history_lines.append(f"- {role}: {content}")
+        formatted_history = "\n".join(formatted_history_lines)
         prompt = RESULT_TEMPLATE.format(sql=sql, rows=json.dumps(rows, indent=2), context=json.dumps(context, indent=2), history=formatted_history or "(no prior messages)")
         full_prompt = f"{prompt}\nUser question: {user_message}"
         try:

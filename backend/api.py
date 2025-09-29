@@ -85,7 +85,14 @@ async def chat(request: ChatRequest, session: Session = Depends(get_session)):
     enrichment_messages: list[str] = []
 
     if gemini_payload.sql:
-        missing_columns = [col for col in gemini_payload.suggested_sql_columns if col not in available_columns]
+        sql_lower = gemini_payload.sql.lower()
+        for col in gemini_payload.suggested_sql_columns:
+            if col in available_columns:
+                continue
+            alias_pattern = f" as {col.lower()}"
+            if alias_pattern in sql_lower:
+                continue
+            missing_columns.append(col)
     if gemini_payload.enrichment_hint:
         missing_attr = gemini_payload.enrichment_hint.get("attribute")
         if missing_attr and missing_attr not in available_columns:

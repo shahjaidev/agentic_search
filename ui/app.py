@@ -390,7 +390,7 @@ def fetch_history() -> None:
 
 def send_message(conversation_id: str, user_message: str) -> Dict[str, Any]:
     payload = {"conversation_id": conversation_id, "message": user_message}
-    resp = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=30)
+    resp = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=90)
     if not resp.ok:
         raise RuntimeError(f"{resp.status_code} {resp.text}")
     return resp.json()

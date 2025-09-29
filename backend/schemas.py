@@ -75,7 +75,8 @@ class SqlPlan(BaseModel):
     @field_validator("sql")
     @classmethod
     def ensure_select(cls, value: str) -> str:
-        if not value.lower().strip().startswith("select"):
+        normalized = value.lower().strip()
+        if not normalized.startswith("select") and not normalized.startswith("with"):
             raise ValueError("Only SELECT statements are allowed in demo mode")
         return value
 
