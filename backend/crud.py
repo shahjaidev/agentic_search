@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from sqlalchemy import select, text
@@ -10,6 +10,24 @@ from sqlalchemy.orm import Session
 
 from backend import models
 from backend.database import data_connection
+
+
+def _parse_end_date(value: object) -> datetime | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Normalize common ISO formats, handling trailing 'Z' or missing time components.
+    try:
+        normalized = text.replace("Z", "+00:00")
+        return datetime.fromisoformat(normalized)
+    except ValueError:
+        try:
+            return datetime.fromisoformat(f"{text}T00:00:00")
+        except ValueError:
+            return None
 
 
 def get_conversation(session: Session, conversation_id: Optional[str]) -> Optional[models.Conversation]:
@@ -126,5 +144,22 @@ def execute_sql(session: Session, sql: str, params: dict | None = None) -> list[
     params = params or {}
     with data_connection() as conn:
         result = conn.execute(text(sql), params)
-        return [dict(row._mapping) for row in result]
+        rows = [dict(row._mapping) for row in result]
 
+    if not rows:
+        return rows
+
+    now = datetime.now(timezone.utc)
+    filtered: list[dict] = []
+    for row in rows:
+        if "end_date_iso" not in row:
+            filtered.append(row)
+            continue
+        end_value = _parse_end_date(row.get("end_date_iso"))
+        if end_value is None:
+            continue
+        if end_value.tzinfo is None:
+            end_value = end_value.replace(tzinfo=timezone.utc)
+        if end_value > now:
+            filtered.append(row)
+    return filtered

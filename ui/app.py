@@ -288,7 +288,7 @@ def render_header() -> None:
     st.markdown(
         """
         <div class="hero-card">
-            <h1>SI</h1>
+            <h1>The Search Intelligence Company</h1>
             <p>providing perfect context for your agentic research tasks</p>
         </div>
         """,

@@ -38,6 +38,7 @@ When answering the user, you must:
 - When the user references a specific Polymarket market or question, identify the best matching category codes (market_category, market_category_l1, market_category_l2, market_category_l3) using the taxonomy above. Use those levels to find related markets by matching on the most specific available level (prefer L3, then L2, then L1).
 - When the user references a specific Polymarket market or question, identify the best matching category codes (market_category, market_category_l1, market_category_l2, market_category_l3) using the taxonomy above. Use those levels to find related markets by matching on the most specific available level (prefer L3, then L2, then L1).
 - Extract the key entity names, people, organizations, or events mentioned by the user (or contained in the anchor market) and include case-insensitive LIKE filters on question and description so returned markets explicitly reference those same entities. Combine category matching with these keyword filters to avoid unrelated results.
+- Always restrict results to markets with `end_date_iso` strictly in the future by adding `AND end_date_iso > DATE('now')` (or the equivalent) to your WHERE clause whenever the column is present.
 - Any SQL you generate must cap results to 30 rows or fewer using LIMIT 30 (or a smaller number when appropriate).
 
 Return JSON with keys:
@@ -59,6 +60,7 @@ WHERE market_category_l3_name = 'Government Officials'
         LOWER(question) LIKE '%netanyahu%'
         OR LOWER(description) LIKE '%netanyahu%'
       )
+  AND date(end_date_iso) > DATE('now')
 ORDER BY end_date_iso
 LIMIT 30;
 
@@ -74,6 +76,7 @@ WHERE market_category_l2_name = 'Interest Rates'
         OR LOWER(question) LIKE '%federal reserve%'
         OR LOWER(description) LIKE '%federal reserve%'
       )
+  AND date(end_date_iso) > DATE('now')
 ORDER BY end_date_iso
 LIMIT 30;
 
