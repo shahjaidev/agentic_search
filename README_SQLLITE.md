@@ -13,7 +13,7 @@ Simple FastAPI + vanilla JS app to inspect SQLite databases under this project.
 2. Start the server:
 
    ```bash
-   uvicorn sqlite_explorer_api:app --reload
+   SQLITE_EXPLORER_ALLOW_ANY=1 uvicorn sqlite_explorer_api:app --reload --port 8002
    ```
 
-3. Open http://127.0.0.1:8000/ in a browser, enter a DB path like `data/yc_db.db`, load the schema, and run read-only queries.
+3. Open http://127.0.0.1:8002/ in a browser, enter a DB path like `data/yc_db.db`, load the schema, and run read-only queries.

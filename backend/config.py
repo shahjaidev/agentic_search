@@ -20,7 +20,7 @@ class Settings(BaseSettings):
         description="Primary SQLAlchemy database URL for application state.",
     )
     polymarket_database_url: str = Field(
-        default="sqlite:///polymarket/data/polymarket_markets.db",
+        default="sqlite:////Users/jaidevshah/agentic_search/polymarket/data/polymarket_markets_data_enriched.db",
         description="Read-only SQLAlchemy database URL for Polymarket markets.",
     )
     gemini_model: str = Field(

@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import google.generativeai as genai
 
@@ -20,87 +20,64 @@ try:
 except OSError:  # pragma: no cover - defensive in case file missing
     TAXONOMY_REFERENCE = ""
 
+SYSTEM_INSTRUCTION = f"""
+You are a data assistant working with a SQLite table named polymarket_markets_enriched. You help craft precise SQL and concise explanations for users exploring Polymarket data, including pricing and liquidity insights.
+
+Taxonomy reference for market categorization:
+{TAXONOMY_REFERENCE or '(taxonomy reference unavailable)'}
+
+Core guidance:
+- Prefer generating a SQL SELECT statement that answers the user whenever the existing columns allow it.
+- Use aggregations such as COUNT(*), SUM(...), AVG(...), MIN(...), and MAX(...) when they clarify the answer.
+- Pricing columns include last_trade_price, best_bid, best_ask, and outcome_prices; liquidity metrics include liquidity_num (total), liquidity_amm, liquidity_clob, and volume_num. Use them directly to answer questions about spreads, depth, recent trading activity, or top markets by liquidity.
+- When a user mentions entities, countries, tickers, or names (e.g., "Russia", "Putin", "Ethereum"), add case-insensitive filters on `question`, `description`, `market_slug`, and `tags` using those keywords before applying broader category filters. Prioritize markets that explicitly reference those terms.
+- For multi-keyword prompts ("Microsoft" and "OpenAI"), include all keywords in the WHERE clause. Use grouped conditions like `(LOWER(question) LIKE '%microsoft%' OR LOWER(description) LIKE '%microsoft%' OR LOWER(tags) LIKE '%microsoft%')` combined with `OR` for each entity, and add acquisition-related keywords when relevant (`LIKE '%acquire%'`, `'%acquisition%'`).
+- Combine keyword filters with relevant taxonomy levels (market_category*, market_category_*_name) so results stay on-topic (e.g., `market_category_l1_name = 'Politics' AND LOWER(question) LIKE '%russia%'`).
+- Only skip SQL when the request cannot be satisfied; in those cases, leave `sql` empty and request enrichment via `enrichment_hint`.
+- Suggest additional columns only when they would genuinely improve the result.
+- Keep results limited to active markets by ensuring `end_date_iso > DATE('now')` whenever that column is involved, and cap row counts at 30 or fewer.
+- Treat executed SQL results as the authoritative source; summarize them first, then optionally add complementary context using other future-dated market names that match the user’s intent.
+- For references to specific markets, map them into the taxonomy levels (market_category, market_category_l1, market_category_l2, market_category_l3) and combine category matching with case-insensitive keyword filters on question/description fields.
+- You may request multiple SQL statements by returning `sql_batch` (array of objects with optional `name`, required `sql`, and optional `sql_variables`). Statements execute sequentially and their outputs will be returned to you.
+- Always set `top_n` to the number of markets you want to highlight (default 10, maximum 100).
+- After execution you must populate `final_table_rows` with exactly `top_n` dictionaries representing the markets you want displayed. Ensure the dictionaries include consistent column keys.
+- Always return valid JSON with keys: assistant_message, facts, suggested_sql_columns, enrichment_hint, sql, sql_variables, sql_batch, top_n, final_table_rows.
+
+Example SQL patterns you can emit:
+- Top liquidity today: `SELECT question, liquidity_num, last_trade_price FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') ORDER BY liquidity_num DESC LIMIT 5`
+- Narrowest spread: `SELECT question, best_bid, best_ask, (best_ask - best_bid) AS spread FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND best_bid IS NOT NULL AND best_ask IS NOT NULL ORDER BY spread ASC LIMIT 5`
+- Russia-focused request: `SELECT question, liquidity_num, last_trade_price, market_category_l1_name FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND (LOWER(question) LIKE '%russia%' OR LOWER(description) LIKE '%russia%' OR LOWER(tags) LIKE '%russia%') ORDER BY liquidity_num DESC LIMIT 5`
+- Microsoft + OpenAI acquisition: `SELECT question, liquidity_num, last_trade_price FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND ((LOWER(question) LIKE '%microsoft%' OR LOWER(description) LIKE '%microsoft%' OR LOWER(tags) LIKE '%microsoft%') OR (LOWER(question) LIKE '%openai%' OR LOWER(description) LIKE '%openai%' OR LOWER(tags) LIKE '%openai%')) AND (LOWER(question) LIKE '%acquir%' OR LOWER(description) LIKE '%acquir%') ORDER BY liquidity_num DESC LIMIT 10`
+"""
+
 PROMPT_TEMPLATE = """
-You are a data assistant working with a SQLite table named polymarket_markets.
-Columns available: {columns}
+Available columns: {columns}
 Recent conversation turns:
 {history}
 
-Taxonomy reference for market categorization:
-{taxonomy}
-
-When answering the user, you must:
-- Produce a SQL SELECT statement that will answer the user's question whenever it is possible with the available columns.
-- Carefully consider if the question can be answered with the current columns and aggregations such as COUNT(*), SUM(...), AVG(...), MIN(...), and MAX(...) etc. when they can help answer the question.
-- Only omit SQL as a last resort if the question cannot be answered with the current columns and aggregations or other sql operations; in that case, set sql to an empty string and recommend enrichment.
-- Suggest additional columns in suggested_sql_columns only if they would truly help.
-- If enrichment is needed, explicitly set enrichment_hint with the column name and reason.
-- When the user references a specific Polymarket market or question, identify the best matching category codes (market_category, market_category_l1, market_category_l2, market_category_l3) using the taxonomy above. Use those levels to find related markets by matching on the most specific available level (prefer L3, then L2, then L1).
-- When the user references a specific Polymarket market or question, identify the best matching category codes (market_category, market_category_l1, market_category_l2, market_category_l3) using the taxonomy above. Use those levels to find related markets by matching on the most specific available level (prefer L3, then L2, then L1).
-- Extract the key entity names, people, organizations, or events mentioned by the user (or contained in the anchor market) and include case-insensitive LIKE filters on question and description so returned markets explicitly reference those same entities. Combine category matching with these keyword filters to avoid unrelated results.
-- Always restrict results to markets with `end_date_iso` strictly in the future by adding `AND end_date_iso > DATE('now')` (or the equivalent) to your WHERE clause whenever the column is present.
-- Any SQL you generate must cap results to 30 rows or fewer using LIMIT 30 (or a smaller number when appropriate).
-
-Return JSON with keys:
-- assistant_message: conversational answer (string)
-- facts: array of objects with 'text' and 'source' (may be empty)
-- suggested_sql_columns: array of useful column names to display in the UI
-- enrichment_hint: optional object with 'attribute' and 'reason' if data is missing
-- sql: SQL SELECT statement using available columns to answer the question if possible
-- sql_variables: dictionary of parameters to plug into the SQL query (optional)
-
-Example 1:
-User question: "I'm looking at the market 'Netanyahu out by 2025'. What other markets in the same detailed category should I compare it with?"
-SQL to run:
-SELECT market_id, question, end_date_iso, market_category, market_category_l1_name, market_category_l2_name, market_category_l3_name
-FROM polymarket_markets
-WHERE market_category_l3_name = 'Government Officials'
-  AND market_id != 'netanyahu-out-in-2025-492'
-  AND (
-        LOWER(question) LIKE '%netanyahu%'
-        OR LOWER(description) LIKE '%netanyahu%'
-      )
-  AND date(end_date_iso) > DATE('now')
-ORDER BY end_date_iso
-LIMIT 30;
-
-Example 2:
-User question: "List markets similar to the Fed rate cuts market." 
-SQL to run:
-SELECT market_id, question, rewards, end_date_iso
-FROM polymarket_markets
-WHERE market_category_l2_name = 'Interest Rates'
-  AND (
-        LOWER(question) LIKE '%fed%'
-        OR LOWER(description) LIKE '%fed%'
-        OR LOWER(question) LIKE '%federal reserve%'
-        OR LOWER(description) LIKE '%federal reserve%'
-      )
-  AND date(end_date_iso) > DATE('now')
-ORDER BY end_date_iso
-LIMIT 30;
-
-Example 3:
-User question: "How many markets per primary category are currently accepting orders?"
-SQL to run:
-SELECT market_category_l1_name AS category, COUNT(*) AS markets_accepting_orders
-FROM polymarket_markets
-WHERE accepting_orders = 1
-GROUP BY market_category_l1_name
-ORDER BY markets_accepting_orders DESC;
-
-Always return valid JSON.
+User question:
+{user_question}
+\n+Instructions:
+- Analyze every executed query (see `batch_results` inside the additional context when present).
+- Select the best markets and fill `final_table_rows` with exactly `top_n` entries.
+- Return JSON following the standard schema.
 """
 
 RESULT_TEMPLATE = """
-You previously generated the SQL query shown below and it has now been executed.
-SQL statement: {sql}
-Rows (JSON): {rows}
-Additional context: {context}
+Executed SQL statement:
+{sql}
+
+Result rows (JSON):
+{rows}
+
+Additional context:
+{context}
+
 Chat history (most recent first):
 {history}
 
-Use this information to craft a conversational answer to the user's question. Reference the key figures explicitly and keep things concise. If context indicates pending_columns that are not yet available, acknowledge the enrichment request and explain that the answer will follow once those columns are populated. Respond with JSON following the same schema as before.
+User question:
+{user_question}
 """
 
 
@@ -110,11 +87,16 @@ class GeminiClient:
         self.model_name = model_name or settings.gemini_model
         self.enabled = bool(self.api_key)
         self.logger = logging.getLogger(__name__)
+        self.last_chat_prompt: Optional[str] = None
+        self.last_chat_response_text: Optional[str] = None
+        self.last_answer_prompt: Optional[str] = None
+        self.last_answer_response_text: Optional[str] = None
 
         if self.enabled:
             genai.configure(api_key=self.api_key)
             self.model = genai.GenerativeModel(
                 model_name=self.model_name,
+                system_instruction=SYSTEM_INSTRUCTION,
                 generation_config={
                     "temperature": 0.1,
                     "top_p": 0.8,
@@ -125,9 +107,6 @@ class GeminiClient:
             self.model = None
 
     def run_chat(self, columns: List[str], user_message: str, history: List[Dict[str, str]] | None = None) -> Dict[str, Any]:
-        if not self.enabled or self.model is None:
-            return self._fallback_response(user_message, columns)
-
         formatted_history_lines = []
         for item in history or []:
             role = item.get("role", "assistant")
@@ -137,17 +116,28 @@ class GeminiClient:
         prompt = PROMPT_TEMPLATE.format(
             columns=", ".join(columns),
             history=formatted_history or "(no prior messages)",
-            taxonomy=TAXONOMY_REFERENCE or "(taxonomy reference unavailable)",
+            user_question=user_message,
         )
-        full_prompt = f"{prompt}\nUser question: {user_message}"
+        self.last_chat_prompt = prompt
+
+        if not self.enabled or self.model is None:
+            fallback = self._fallback_response(user_message, columns)
+            self.last_chat_response_text = json.dumps(fallback)
+            return fallback
 
         try:
-            response = self.model.generate_content(full_prompt)
+            response = self.model.generate_content(prompt)
+            self.last_chat_response_text = getattr(response, "text", None)
         except Exception as exc:  # pragma: no cover - defensive fallback
             self.logger.error("Gemini call failed: %s", exc)
-            return self._fallback_response(user_message, columns)
+            fallback = self._fallback_response(user_message, columns)
+            self.last_chat_response_text = json.dumps(fallback)
+            return fallback
 
-        return self._parse_response(response, user_message, columns)
+        parsed = self._parse_response(response, user_message, columns)
+        if self.last_chat_response_text is None:
+            self.last_chat_response_text = json.dumps(parsed)
+        return parsed
 
     def run_answer_with_results(
         self,
@@ -157,17 +147,6 @@ class GeminiClient:
         context: Dict[str, Any] | None = None,
         history: List[Dict[str, str]] | None = None,
     ) -> Dict[str, Any]:
-        if not self.enabled or self.model is None:
-            summary = self._summarize_rows(sql, rows)
-            return {
-                "answer": summary,
-                "facts": [],
-                "suggested_sql_columns": [],
-                "enrichment_hint": None,
-                "sql": sql,
-                "sql_variables": {},
-            }
-
         context = context or {}
         formatted_history_lines = []
         for item in history or []:
@@ -175,32 +154,54 @@ class GeminiClient:
             content = item.get("content", "")
             formatted_history_lines.append(f"- {role}: {content}")
         formatted_history = "\n".join(formatted_history_lines)
-        formatted_history_lines = []
-        for item in history or []:
-            role = item.get("role", "assistant")
-            content = item.get("content", "")
-            formatted_history_lines.append(f"- {role}: {content}")
-        formatted_history = "\n".join(formatted_history_lines)
-        prompt = RESULT_TEMPLATE.format(sql=sql, rows=json.dumps(rows, indent=2), context=json.dumps(context, indent=2), history=formatted_history or "(no prior messages)")
-        full_prompt = f"{prompt}\nUser question: {user_message}"
-        try:
-            response = self.model.generate_content(full_prompt)
-        except Exception as exc:  # pragma: no cover - defensive fallback
-            self.logger.error("Gemini follow-up call failed: %s", exc)
+        prompt = RESULT_TEMPLATE.format(
+            sql=sql,
+            rows=json.dumps(rows, indent=2),
+            context=json.dumps(context, indent=2),
+            history=formatted_history or "(no prior messages)",
+            user_question=user_message,
+        )
+        self.last_answer_prompt = prompt
+
+        if not self.enabled or self.model is None:
             summary = self._summarize_rows(sql, rows)
-            return {
+            fallback = {
                 "answer": summary,
                 "facts": [],
                 "suggested_sql_columns": [],
                 "enrichment_hint": None,
                 "sql": sql,
                 "sql_variables": {},
+                "final_table_rows": rows[: context.get("top_n", 10)],
+                "top_n": context.get("top_n", 10),
             }
+            self.last_answer_response_text = json.dumps(fallback)
+            return fallback
+        try:
+            response = self.model.generate_content(prompt)
+            self.last_answer_response_text = getattr(response, "text", None)
+        except Exception as exc:  # pragma: no cover - defensive fallback
+            self.logger.error("Gemini follow-up call failed: %s", exc)
+            summary = self._summarize_rows(sql, rows)
+            fallback = {
+                "answer": summary,
+                "facts": [],
+                "suggested_sql_columns": [],
+                "enrichment_hint": None,
+                "sql": sql,
+                "sql_variables": {},
+                "final_table_rows": rows[: context.get("top_n", 10)],
+                "top_n": context.get("top_n", 10),
+            }
+            self.last_answer_response_text = json.dumps(fallback)
+            return fallback
 
         parsed = self._parse_response(response, user_message, [], allow_empty=True)
         if not parsed.get("assistant_message") and not parsed.get("answer"):
             summary = self._summarize_rows(sql, rows)
             parsed["answer"] = summary
+        if self.last_answer_response_text is None:
+            self.last_answer_response_text = json.dumps(parsed)
         return parsed
 
     def _parse_response(

@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 from backend import models
 from backend.database import data_connection
 
+POLYMARKET_TABLE = "polymarket_markets_enriched"
+
 
 def _parse_end_date(value: object) -> datetime | None:
     if not value:
@@ -138,6 +140,27 @@ def list_columns(session: Session, table_name: str) -> list[str]:
     with data_connection() as conn:
         result = conn.execute(text(f"PRAGMA table_info({table_name})"))
         return [row[1] for row in result]
+
+
+def list_future_market_names(limit: int | None = None) -> list[str]:
+    """Return future-dated market questions for supplemental context."""
+
+    base_sql = f"""
+        SELECT question
+        FROM {POLYMARKET_TABLE}
+        WHERE question IS NOT NULL
+          AND question != ''
+          AND end_date_iso IS NOT NULL
+          AND date(end_date_iso) > DATE('now')
+        ORDER BY question
+    """
+    if limit is not None and limit > 0:
+        base_sql += "\n        LIMIT :limit"
+    query = text(base_sql)
+    params = {"limit": limit} if limit is not None and limit > 0 else {}
+    with data_connection() as conn:
+        result = conn.execute(query, params)
+        return [row[0] for row in result]
 
 
 def execute_sql(session: Session, sql: str, params: dict | None = None) -> list[dict]:

@@ -131,6 +131,29 @@ def _resolve_market_id(market: Dict, simplified: bool, serialized: str) -> str:
     return f"hash:{digest}"
 
 
+FTS_TEXT_COLUMNS: tuple[str, ...] = (
+    "question",
+    "description",
+    "market_slug",
+    "tags",
+    "market_category",
+    "market_category_name",
+    "market_category_l1_name",
+    "market_category_l2_name",
+    "market_category_l3_name",
+)
+
+
+STRUCTURED_INDEX_COLUMNS: tuple[str, ...] = (
+    "market_category_l1_name",
+    "market_category_l2_name",
+    "market_category_l3_name",
+    "market_category_name",
+    "end_date_iso",
+    "game_start_time",
+)
+
+
 def _ensure_columns(
     conn: sqlite3.Connection,
     existing_columns: set[str],
@@ -146,6 +169,127 @@ def _ensure_columns(
         )
         existing_columns.add(column)
     return existing_columns
+
+
+def _ensure_indexes(conn: sqlite3.Connection, existing_columns: set[str]) -> None:
+    """Create helpful secondary indexes when the source columns exist."""
+
+    for column in STRUCTURED_INDEX_COLUMNS:
+        if column not in existing_columns:
+            continue
+        index_name = f"idx_polymarket_markets_{column}"
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS {index_name} ON polymarket_markets ({_quote_identifier(column)})"
+        )
+
+
+def _ensure_fts(conn: sqlite3.Connection) -> None:
+    """Create and sync the FTS5 mirror table and triggers."""
+
+    conn.execute(
+        """
+        CREATE VIRTUAL TABLE IF NOT EXISTS polymarket_markets_fts
+        USING fts5(
+            market_id UNINDEXED,
+            question,
+            description,
+            market_slug,
+            tags,
+            market_category,
+            market_category_name,
+            market_category_l1_name,
+            market_category_l2_name,
+            market_category_l3_name,
+            content='polymarket_markets',
+            content_rowid='rowid',
+            tokenize='unicode61 remove_diacritics 2'
+        )
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS polymarket_markets_fts_ai
+        AFTER INSERT ON polymarket_markets BEGIN
+            INSERT INTO polymarket_markets_fts(
+                rowid,
+                market_id,
+                question,
+                description,
+                market_slug,
+                tags,
+                market_category,
+                market_category_name,
+                market_category_l1_name,
+                market_category_l2_name,
+                market_category_l3_name
+            ) VALUES (
+                new.rowid,
+                new.market_id,
+                coalesce(new.question, ''),
+                coalesce(new.description, ''),
+                coalesce(new.market_slug, ''),
+                coalesce(new.tags, ''),
+                coalesce(new.market_category, ''),
+                coalesce(new.market_category_name, ''),
+                coalesce(new.market_category_l1_name, ''),
+                coalesce(new.market_category_l2_name, ''),
+                coalesce(new.market_category_l3_name, '')
+            );
+        END;
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS polymarket_markets_fts_au
+        AFTER UPDATE ON polymarket_markets BEGIN
+            INSERT INTO polymarket_markets_fts(polymarket_markets_fts, rowid)
+            VALUES('delete', old.rowid);
+            INSERT INTO polymarket_markets_fts(
+                rowid,
+                market_id,
+                question,
+                description,
+                market_slug,
+                tags,
+                market_category,
+                market_category_name,
+                market_category_l1_name,
+                market_category_l2_name,
+                market_category_l3_name
+            ) VALUES (
+                new.rowid,
+                new.market_id,
+                coalesce(new.question, ''),
+                coalesce(new.description, ''),
+                coalesce(new.market_slug, ''),
+                coalesce(new.tags, ''),
+                coalesce(new.market_category, ''),
+                coalesce(new.market_category_name, ''),
+                coalesce(new.market_category_l1_name, ''),
+                coalesce(new.market_category_l2_name, ''),
+                coalesce(new.market_category_l3_name, '')
+            );
+        END;
+        """
+    )
+
+    conn.execute(
+        """
+        CREATE TRIGGER IF NOT EXISTS polymarket_markets_fts_ad
+        AFTER DELETE ON polymarket_markets BEGIN
+            INSERT INTO polymarket_markets_fts(polymarket_markets_fts, rowid)
+            VALUES('delete', old.rowid);
+        END;
+        """
+    )
+
+    conn.execute(
+        """
+        INSERT INTO polymarket_markets_fts(polymarket_markets_fts) VALUES('rebuild')
+        """
+    )
 
 
 def dump_markets(
@@ -179,6 +323,16 @@ def dump_markets(
         existing_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(polymarket_markets)")
         }
+
+        # Guarantee the key text columns exist so the FTS triggers compile cleanly.
+        existing_columns = _ensure_columns(
+            conn,
+            existing_columns,
+            {column: "" for column in FTS_TEXT_COLUMNS},
+        )
+
+        _ensure_indexes(conn, existing_columns)
+        _ensure_fts(conn)
 
         for market in iter_markets(simplified=simplified, timeout=timeout, limit=limit):
             row_id = count + 1

@@ -3,29 +3,29 @@
 from __future__ import annotations
 
 import html
+import json
 import time
 import uuid
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List
 
 import requests
 import streamlit as st
 
 API_BASE_URL = "http://localhost:8001"
+LOG_FILE_PATH = Path(__file__).resolve().parent.parent / "logs" / "chat_runs.jsonl"
 CUSTOM_CSS = """
 <style>
-:root {
-    color-scheme: dark;
-}
-
 body {
     font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 .stApp {
-    background: radial-gradient(circle at 20% 20%, rgba(90, 148, 255, 0.18), transparent 45%),
-                radial-gradient(circle at 80% 10%, rgba(236, 72, 153, 0.15), transparent 55%),
-                #0f172a;
-    color: #f8fafc;
+    background: radial-gradient(circle at 12% 18%, rgba(186, 230, 253, 0.45), transparent 42%),
+                radial-gradient(circle at 88% 14%, rgba(244, 215, 255, 0.4), transparent 58%),
+                linear-gradient(180deg, #f9fbfe 0%, #eef2fb 60%, #e6ecfb 100%);
+    color: #1f2a44;
 }
 
 .block-container {
@@ -35,17 +35,18 @@ body {
 }
 
 [data-testid="stSidebar"] {
-    background: rgba(15, 23, 42, 0.9);
-    border-right: 1px solid rgba(148, 163, 184, 0.16);
+    background: rgba(255, 255, 255, 0.92);
+    border-right: 1px solid rgba(203, 213, 225, 0.6);
 }
 
 .sidebar-card {
-    background: rgba(30, 41, 59, 0.78);
-    border-radius: 1.1rem;
-    padding: 1.2rem;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(236, 244, 255, 0.94));
+    border-radius: 1.2rem;
+    padding: 1.3rem;
     border: 1px solid rgba(148, 163, 184, 0.2);
-    color: #e2e8f0;
-    margin-bottom: 1.5rem;
+    color: #374151;
+    margin-bottom: 1.6rem;
+    box-shadow: 0 20px 38px rgba(15, 23, 42, 0.12);
 }
 
 .sidebar-card h3 {
@@ -55,77 +56,79 @@ body {
 }
 
 .sidebar-card p {
-    margin: 0 0 0.6rem 0;
-    font-size: 0.92rem;
-    color: rgba(226, 232, 240, 0.78);
-    line-height: 1.4;
+    margin: 0 0 0.7rem 0;
+    font-size: 0.93rem;
+    color: rgba(71, 85, 105, 0.88);
+    line-height: 1.55;
 }
 
 .sidebar-card .pill {
     display: inline-flex;
     padding: 0.25rem 0.55rem;
     border-radius: 999px;
-    border: 1px solid rgba(148, 163, 184, 0.25);
+    border: 1px solid rgba(59, 130, 246, 0.25);
     margin: 0 0.35rem 0.35rem 0;
     font-size: 0.78rem;
-    background: rgba(96, 165, 250, 0.18);
-    color: #dbeafe;
+    background: rgba(191, 219, 254, 0.42);
+    color: #1d4ed8;
 }
 
 .sidebar-tip {
     font-size: 0.82rem;
-    color: rgba(148, 163, 184, 0.8);
-    margin-top: 0.8rem;
+    color: rgba(99, 115, 132, 0.82);
+    margin-top: 0.85rem;
 }
 
 .hero-card {
-    padding: 1.5rem 1.8rem;
-    border-radius: 1.5rem;
-    background: rgba(30, 41, 59, 0.7);
-    border: 1px solid rgba(148, 163, 184, 0.22);
-    backdrop-filter: blur(14px);
-    margin-bottom: 1.8rem;
+    padding: 1.8rem 2.3rem;
+    border-radius: 1.8rem;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.98), rgba(242, 248, 255, 0.94));
+    border: 1px solid rgba(203, 213, 225, 0.55);
+    backdrop-filter: blur(12px);
+    margin-bottom: 2.1rem;
+    box-shadow: 0 28px 50px rgba(15, 23, 42, 0.18);
 }
 
 .hero-card h1 {
-    font-size: clamp(1.9rem, 2.4vw, 2.4rem);
-    margin: 0 0 0.4rem 0;
+    font-size: clamp(2.1rem, 3vw, 2.8rem);
+    margin: 0 0 0.55rem 0;
     font-weight: 700;
+    color: #0f172a;
 }
 
 .hero-card p {
     margin: 0;
-    font-size: 0.98rem;
-    color: rgba(226, 232, 240, 0.82);
-    line-height: 1.55;
+    font-size: 1rem;
+    color: rgba(71, 85, 105, 0.85);
+    line-height: 1.65;
 }
 
 .chat-bubble {
     padding: 0.85rem 1.1rem;
     border-radius: 1.2rem;
     line-height: 1.55;
-    border: 1px solid rgba(148, 163, 184, 0.18);
-    box-shadow: 0 10px 28px rgba(15, 23, 42, 0.22);
+    border: 1px solid rgba(203, 213, 225, 0.6);
+    box-shadow: 0 20px 34px rgba(148, 163, 184, 0.18);
     backdrop-filter: blur(6px);
-    font-size: 0.98rem;
+    font-size: 1rem;
 }
 
 .chat-bubble.user-bubble {
-    background: linear-gradient(135deg, rgba(125, 211, 252, 0.9), rgba(59, 130, 246, 0.94));
-    color: #0b1120;
+    background: linear-gradient(135deg, rgba(219, 234, 254, 0.95), rgba(191, 219, 254, 0.95));
+    color: #1d4ed8;
 }
 
 .chat-bubble.assistant-bubble {
-    background: rgba(30, 41, 59, 0.72);
-    color: #e2e8f0;
+    background: rgba(255, 255, 255, 0.94);
+    color: #1f2937;
 }
 
 .payload-block {
     margin-top: 0.7rem;
     padding: 0.75rem 1rem;
-    border-radius: 1rem;
-    background: rgba(15, 23, 42, 0.7);
-    border: 1px solid rgba(148, 163, 184, 0.2);
+    border-radius: 1.1rem;
+    background: rgba(255, 255, 255, 0.96);
+    border: 1px solid rgba(203, 213, 225, 0.6);
 }
 
 .payload-block strong {
@@ -133,8 +136,8 @@ body {
     margin-bottom: 0.35rem;
     letter-spacing: 0.02em;
     text-transform: uppercase;
-    font-size: 0.74rem;
-    color: rgba(148, 163, 184, 0.86);
+    font-size: 0.75rem;
+    color: rgba(59, 130, 246, 0.8);
 }
 
 .payload-block ul {
@@ -148,10 +151,10 @@ body {
     padding: 0.2rem 0.55rem;
     margin: 0 0.3rem 0.3rem 0;
     border-radius: 999px;
-    border: 1px solid rgba(56, 189, 248, 0.4);
-    background: rgba(59, 130, 246, 0.18);
+    border: 1px solid rgba(59, 130, 246, 0.35);
+    background: rgba(191, 219, 254, 0.5);
     font-size: 0.8rem;
-    color: #bae6fd;
+    color: #1d4ed8;
 }
 
 [data-testid="stDeployButton"] {
@@ -166,9 +169,9 @@ div[data-testid="stToolbar"] {
 .table-block {
     margin-top: 0.75rem;
     border-radius: 1.1rem;
-    border: 1px solid rgba(59, 130, 246, 0.28);
-    background: rgba(15, 23, 42, 0.78);
-    box-shadow: 0 18px 44px rgba(15, 23, 42, 0.45);
+    border: 1px solid rgba(203, 213, 225, 0.8);
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 22px 48px rgba(148, 163, 184, 0.25);
     overflow: hidden;
     width: 100%;
 }
@@ -176,7 +179,7 @@ div[data-testid="stToolbar"] {
 .table-caption {
     display: block;
     padding: 0.9rem 1.2rem 0 1.2rem;
-    color: rgba(191, 219, 254, 0.86);
+    color: rgba(79, 70, 229, 0.75);
     font-size: 0.85rem;
     letter-spacing: 0.03em;
     text-transform: uppercase;
@@ -192,7 +195,7 @@ div[data-testid="stToolbar"] {
 
 .table-container table {
     width: 100%;
-    min-width: 720px;
+    min-width: 780px;
     border-collapse: separate;
     border-spacing: 0;
     font-size: 0.92rem;
@@ -202,8 +205,8 @@ div[data-testid="stToolbar"] {
     position: sticky;
     top: 0;
     z-index: 1;
-    background: rgba(37, 99, 235, 0.32);
-    color: #f8fafc;
+    background: rgba(219, 234, 254, 0.95);
+    color: #1e3a8a;
     text-transform: none;
     font-weight: 600;
 }
@@ -211,9 +214,9 @@ div[data-testid="stToolbar"] {
 .table-container th,
 .table-container td {
     padding: 0.65rem 0.9rem;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.24);
+    border-bottom: 1px solid rgba(209, 213, 219, 0.8);
     text-align: left;
-    color: #f8fafc;
+    color: #1f2937;
     white-space: nowrap;
 }
 
@@ -224,15 +227,15 @@ div[data-testid="stToolbar"] {
 }
 
 .table-container tbody tr:nth-child(odd) {
-    background: rgba(15, 23, 42, 0.68);
+    background: rgba(248, 250, 255, 0.96);
 }
 
 .table-container tbody tr:nth-child(even) {
-    background: rgba(15, 23, 42, 0.58);
+    background: rgba(237, 242, 255, 0.94);
 }
 
 .table-container tbody tr:hover {
-    background: rgba(59, 130, 246, 0.28);
+    background: rgba(191, 219, 254, 0.7);
 }
 
 [data-testid="stChatMessage"] {
@@ -241,33 +244,81 @@ div[data-testid="stToolbar"] {
 
 [data-testid="stChatInput"] > div {
     border-radius: 1rem;
-    border: 1px solid rgba(148, 163, 184, 0.25);
-    background: rgba(15, 23, 42, 0.82);
-    box-shadow: 0 10px 26px rgba(15, 23, 42, 0.32);
+    border: 1px solid rgba(203, 213, 225, 0.6);
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 16px 36px rgba(15, 23, 42, 0.18);
 }
 
-[data-testid="stChatInput"] div[data-baseweb="input"] {
-    background: transparent !important;
+[data-testid="stChatInput"] > div {
+    border-radius: 1rem;
+    border: 1px solid rgba(203, 213, 225, 0.6);
+    background: rgba(255, 255, 255, 0.95);
+    box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
 }
 
-[data-testid="stChatInput"] div[data-baseweb="input"] > div {
-    background: transparent !important;
+[data-testid="stChatInput"] div[data-baseweb="textarea"] {
+    background: rgba(255, 255, 255, 0.95) !important;
+    border-radius: 0.75rem !important;
 }
 
 [data-testid="stChatInput"] textarea {
-    color: #e2e8f0 !important;
-    font-size: 0.95rem !important;
-    background: transparent !important;
-    caret-color: #60a5fa !important;
+    color: #0f172a !important;
+    font-size: 0.97rem !important;
+    background: rgba(255, 255, 255, 0.98) !important;
+    caret-color: #2563eb !important;
 }
 
 [data-testid="stChatInput"] textarea::placeholder {
-    color: rgba(148, 163, 184, 0.78) !important;
+    color: rgba(107, 114, 128, 0.68) !important;
+}
+
+[data-testid="stChatInput"] button {
+    background: linear-gradient(135deg, #2563eb, #4f46e5) !important;
+    color: #fff !important;
+    border-radius: 0.8rem !important;
+}
+
+[data-testid="stChatInput"] textarea::placeholder {
+    color: rgba(99, 115, 132, 0.65) !important;
 }
 
 button[kind="primary"], button[kind="secondary"] {
     border-radius: 0.9rem !important;
-    border: 1px solid rgba(148, 163, 184, 0.25) !important;
+    border: 1px solid rgba(148, 163, 184, 0.35) !important;
+}
+
+[data-testid="stTabs"] button[role="tab"] {
+    background: rgba(255, 255, 255, 0.85) !important;
+    border: none !important;
+    border-radius: 0.9rem 0.9rem 0 0 !important;
+    margin-right: 0.4rem !important;
+    padding: 0.75rem 1.6rem !important;
+    font-size: 1.05rem !important;
+    font-weight: 600 !important;
+    color: rgba(30, 64, 175, 0.72) !important;
+    box-shadow: 0 -4px 16px rgba(15, 23, 42, 0.08);
+}
+
+[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+    color: #1e3a8a !important;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(226, 232, 240, 0.9)) !important;
+    box-shadow: 0 -6px 22px rgba(59, 130, 246, 0.12);
+}
+
+[data-testid="stTabs"] button[role="tab"]:hover {
+    color: #1d4ed8 !important;
+}
+
+[data-testid="stTabs"] div[data-baseweb="tab-highlight"] {
+    background: linear-gradient(90deg, rgba(37, 99, 235, 0.85), rgba(79, 70, 229, 0.85)) !important;
+    height: 3px !important;
+    border-radius: 999px !important;
+}
+
+[data-testid="stHeader"] {
+    background: transparent !important;
+    color: inherit !important;
+    box-shadow: none !important;
 }
 </style>
 """
@@ -349,7 +400,7 @@ def render_bubble(text: str, bubble_class: str) -> str:
     return f'<div class="chat-bubble {bubble_class}">{safe_text}</div>'
 
 
-def display_payload(payload: Dict[str, Any] | None) -> None:
+def display_payload(payload: Dict[str, Any] | None, *, show_summary: bool = True) -> None:
     if not payload:
         return
 
@@ -380,7 +431,7 @@ def display_payload(payload: Dict[str, Any] | None) -> None:
         st.markdown(render_sql_table(rows, caption=caption), unsafe_allow_html=True)
         return
 
-    if summary:
+    if summary and show_summary:
         st.markdown(render_bubble(summary, "assistant-bubble"), unsafe_allow_html=True)
 
 
@@ -389,11 +440,27 @@ def render_sql_table(rows: List[Dict[str, Any]], caption: str | None = None) -> 
         return ""
 
     columns = [col for col in rows[0].keys() if col.lower() != "description"]
+
+    def _normalize(value: Any) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            stripped = value.strip()
+            if (
+                stripped
+                and stripped.upper() == stripped
+                and any(ch.isalpha() for ch in stripped)
+                and not any(ch.isdigit() for ch in stripped)
+            ):
+                return stripped.title()
+            return stripped
+        return str(value)
+
     header_cells = "".join(f"<th>{html.escape(str(col))}</th>" for col in columns)
     body_rows = []
     for row in rows:
         cells = "".join(
-            f"<td>{html.escape(str(row.get(col, '')))}</td>" for col in columns
+            f"<td>{html.escape(_normalize(row.get(col, '')))}</td>" for col in columns
         )
         body_rows.append(f"<tr>{cells}</tr>")
     body_html = "".join(body_rows)
@@ -435,7 +502,7 @@ def render_messages(show_debug: bool = False) -> None:
                     placeholder.markdown(render_bubble(buffer, bubble_class), unsafe_allow_html=True)
                     time.sleep(0.02)
                 st.session_state.messages[index]["stream_chunks"] = []
-                display_payload(payload)
+                display_payload(payload, show_summary=(buffer.strip() != summary_text))
                 if show_debug and role == "assistant":
                     render_debug_block(payload)
                 continue
@@ -447,7 +514,7 @@ def render_messages(show_debug: bool = False) -> None:
 
             if should_render_bubble:
                 st.markdown(render_bubble(content, bubble_class), unsafe_allow_html=True)
-            display_payload(payload)
+            display_payload(payload, show_summary=not should_render_bubble or (summary_text and summary_text.strip() != content.strip()))
             if show_debug and role == "assistant":
                 render_debug_block(payload)
 
@@ -460,6 +527,13 @@ def render_debug_block(payload: Dict[str, Any]) -> None:
     with st.expander("Debug details", expanded=False):
         if sql:
             st.code(sql, language="sql")
+        if batch := payload.get("sql_batch"):
+            st.markdown("**SQL Batch**")
+            for entry in batch:
+                label = entry.get("name") or "query"
+                st.write(f"- {label} ({entry.get('row_count', 0)} rows)")
+                if statement := entry.get("sql"):
+                    st.code(statement, language="sql")
         if rows is not None:
             st.json(rows)
         if debug_payload:
@@ -469,6 +543,8 @@ def render_debug_block(payload: Dict[str, Any]) -> None:
             if plan:
                 st.markdown("**SQL Plan**")
                 st.json(plan)
+            if top_n := debug_payload.get("selected_top_n"):
+                st.write(f"Top N requested: {top_n}")
             result_count = debug_payload.get("result_row_count")
             if result_count is not None:
                 st.write(f"Result row count: {result_count}")
@@ -545,6 +621,143 @@ def handle_user_input(user_message: str) -> None:
     message["pending"] = False
     message["stream_chunks"] = chunk_text(message["content"])
     st.session_state.messages[assistant_index] = message
+    st.rerun()
+
+
+def _parse_log_timestamp(value: Any) -> datetime:
+    if isinstance(value, str):
+        cleaned = value.replace("Z", "+00:00")
+        try:
+            return datetime.fromisoformat(cleaned)
+        except ValueError:
+            return datetime.min
+    return datetime.min
+
+
+def load_logs_by_conversation() -> Dict[str, List[Dict[str, Any]]]:
+    if not LOG_FILE_PATH.exists():
+        return {}
+
+    grouped: Dict[str, List[Dict[str, Any]]] = {}
+    try:
+        with LOG_FILE_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                conv_id = record.get("conversation_id", "unknown")
+                grouped.setdefault(conv_id, []).append(record)
+    except OSError:
+        return {}
+
+    for conv_id, records in grouped.items():
+        records.sort(key=lambda item: _parse_log_timestamp(item.get("timestamp")))
+    return grouped
+
+
+def render_logs_tab() -> None:
+    st.subheader("Conversation Logs")
+    log_groups = load_logs_by_conversation()
+    if not log_groups:
+        st.info("No log entries found yet. Send a message to the backend to generate logs.")
+        return
+
+    conversation_ids = list(log_groups.keys())
+    conversation_ids.sort(
+        key=lambda cid: _parse_log_timestamp(log_groups[cid][-1].get("timestamp")),
+        reverse=True,
+    )
+
+    def _format_conversation_option(cid: str) -> str:
+        records = log_groups[cid]
+        latest_ts = records[-1].get("timestamp", "unknown time")
+        return f"{cid} · {len(records)} entries · last {latest_ts}"
+
+    selected_id = st.selectbox(
+        "Select a conversation",
+        conversation_ids,
+        index=0,
+        format_func=_format_conversation_option,
+    )
+
+    records = log_groups.get(selected_id, [])
+    if not records:
+        st.warning("No records for this conversation. Try another one.")
+        return
+
+    for idx, record in enumerate(records):
+        timestamp = record.get("timestamp", "unknown time")
+        user_message = (record.get("user_message") or "").strip()
+        preview = user_message[:80] + ("…" if len(user_message) > 80 else "")
+        header = f"{timestamp} — {preview or 'No user message'}"
+        with st.expander(header, expanded=False):
+            assistant_message = record.get("assistant_message", "")
+            st.markdown(f"**User message**: {user_message or '—'}")
+            st.markdown(f"**Assistant message**: {assistant_message or '—'}")
+
+            if plan := record.get("plan"):
+                st.markdown("**SQL Plan**")
+                st.json(plan)
+
+            sql_executed = record.get("sql_executed")
+            if sql_executed:
+                st.markdown("**Executed SQL**")
+                st.code(sql_executed, language="sql")
+
+            sql_vars = record.get("sql_variables") or {}
+            if sql_vars:
+                st.markdown("**SQL Parameters**")
+                st.json(sql_vars)
+
+            sql_results = record.get("sql_results")
+            if sql_results:
+                st.markdown("**SQL Results**")
+                st.json(sql_results)
+
+            if sql_batch := record.get("sql_batch"):
+                st.markdown("**SQL Batch**")
+                for entry in sql_batch:
+                    label = entry.get("name") or "query"
+                    st.write(f"- {label} ({entry.get('row_count', 0)} rows)")
+                    if statement := entry.get("sql"):
+                        st.code(statement, language="sql")
+
+            execution_summary = record.get("execution_summary")
+            if execution_summary:
+                st.markdown("**Execution Summary**")
+                st.json(execution_summary)
+
+            gemini_block = record.get("gemini") or {}
+            if gemini_block:
+                if prompt := gemini_block.get("chat_prompt"):
+                    st.markdown("**Gemini Planning Prompt**")
+                    st.code(prompt, language="markdown")
+                if response_text := gemini_block.get("chat_response_text"):
+                    st.markdown("**Gemini Planning Raw Response**")
+                    st.code(response_text, language="markdown")
+                if answer_prompt := gemini_block.get("answer_prompt"):
+                    st.markdown("**Gemini Answer Prompt**")
+                    st.code(answer_prompt, language="markdown")
+                if answer_response := gemini_block.get("answer_response_text"):
+                    st.markdown("**Gemini Answer Raw Response**")
+                    st.code(answer_response, language="markdown")
+                if chat_payload := gemini_block.get("chat_response_payload"):
+                    st.markdown("**Gemini Planning Parsed Payload**")
+                    st.json(chat_payload)
+                if answer_payload := gemini_block.get("answer_response_payload"):
+                    st.markdown("**Gemini Answer Parsed Payload**")
+                    st.json(answer_payload)
+
+            debug_payload = record.get("debug")
+            if debug_payload:
+                st.markdown("**Debug Payload**")
+                st.json(debug_payload)
+
+            st.caption(f"Log index: {idx + 1} of {len(records)}")
 
 
 def main() -> None:
@@ -552,13 +765,18 @@ def main() -> None:
     initialize_session_state()
     inject_styles()
     show_debug = render_sidebar()
-    render_header()
 
-    user_input = st.chat_input("Ask something…")
-    if user_input:
-        handle_user_input(user_input)
+    chat_tab, logs_tab = st.tabs(["Chat", "Logs"])
 
-    render_messages(show_debug=show_debug)
+    with chat_tab:
+        render_header()
+        render_messages(show_debug=show_debug)
+        user_input = st.chat_input("Ask something…")
+        if user_input:
+            handle_user_input(user_input)
+
+    with logs_tab:
+        render_logs_tab()
 
 
 if __name__ == "__main__":

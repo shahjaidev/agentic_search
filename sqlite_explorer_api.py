@@ -1,6 +1,7 @@
 """Self-contained FastAPI app to inspect SQLite databases with a minimal UI."""
 from __future__ import annotations
 
+import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable, List, Sequence
@@ -11,7 +12,8 @@ from pydantic import BaseModel, Field
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-ALLOWED_ROOTS = {PROJECT_ROOT, PROJECT_ROOT / "data"}
+ALLOW_ANY_DB = os.environ.get("SQLITE_EXPLORER_ALLOW_ANY", "0") == "1"
+ALLOWED_ROOTS = None if ALLOW_ANY_DB else {PROJECT_ROOT, PROJECT_ROOT / "data"}
 
 
 def _is_within(path: Path, candidate_parent: Path) -> bool:
@@ -30,8 +32,9 @@ def _resolve_db_path(raw_path: str) -> Path:
         candidate = (PROJECT_ROOT / candidate).resolve()
     else:
         candidate = candidate.resolve()
-    if not any(_is_within(candidate, root.resolve()) for root in ALLOWED_ROOTS):
-        raise HTTPException(status_code=403, detail="Database path is outside allowed directories.")
+    if ALLOWED_ROOTS is not None:
+        if not any(_is_within(candidate, root.resolve()) for root in ALLOWED_ROOTS):
+            raise HTTPException(status_code=403, detail="Database path is outside allowed directories.")
     if not candidate.exists() or not candidate.is_file():
         raise HTTPException(status_code=404, detail="Database file not found.")
     return candidate
