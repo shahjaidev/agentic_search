@@ -24,7 +24,7 @@ class Settings(BaseSettings):
         description="Read-only SQLAlchemy database URL for Polymarket markets.",
     )
     gemini_model: str = Field(
-        default="models/gemini-2.5-flash",
+        default="models/gemini-2.5-pro",
         description="Gemini model identifier to use for chat completions.",
     )
 

@@ -52,6 +52,8 @@ class GeminiResponse(BaseModel):
             normalized_batch = []
             for item in payload["sql_batch"]:
                 if isinstance(item, dict) and "sql" in item:
+                    if not isinstance(item.get("sql_variables"), dict):
+                        item["sql_variables"] = {}
                     normalized_batch.append(item)
             payload["sql_batch"] = normalized_batch
         if not isinstance(payload.get("final_table_rows"), list):
@@ -68,6 +70,29 @@ class GeminiResponse(BaseModel):
                 elif isinstance(fact, str):
                     normalized_facts.append({"text": fact})
             payload["facts"] = normalized_facts
+        if not isinstance(payload.get("suggested_sql_columns"), list):
+            payload["suggested_sql_columns"] = []
+        else:
+            normalized_suggestions: list[str] = []
+            for item in payload["suggested_sql_columns"]:
+                if isinstance(item, str) and item.strip():
+                    normalized_suggestions.append(item.strip())
+                elif isinstance(item, dict):
+                    column = item.get("column") or item.get("name") or item.get("value")
+                    if isinstance(column, str) and column.strip():
+                        normalized_suggestions.append(column.strip())
+            if normalized_suggestions:
+                payload["suggested_sql_columns"] = list(dict.fromkeys(normalized_suggestions))
+            else:
+                payload["suggested_sql_columns"] = []
+        top_n_value = payload.get("top_n")
+        try:
+            top_n_int = int(top_n_value)
+            if top_n_int < 1:
+                raise ValueError
+            payload["top_n"] = top_n_int
+        except (TypeError, ValueError):
+            payload["top_n"] = 10
         model = cls.model_validate(payload)
         if require_message and not (model.answer or model.assistant_message):
             raise ValueError("Gemini response missing required `answer` field")

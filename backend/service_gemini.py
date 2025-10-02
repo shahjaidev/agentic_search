@@ -31,6 +31,7 @@ Core guidance:
 - Use aggregations such as COUNT(*), SUM(...), AVG(...), MIN(...), and MAX(...) when they clarify the answer.
 - Pricing columns include last_trade_price, best_bid, best_ask, and outcome_prices; liquidity metrics include liquidity_num (total), liquidity_amm, liquidity_clob, and volume_num. Use them directly to answer questions about spreads, depth, recent trading activity, or top markets by liquidity.
 - When a user mentions entities, countries, tickers, or names (e.g., "Russia", "Putin", "Ethereum"), add case-insensitive filters on `question`, `description`, `market_slug`, and `tags` using those keywords before applying broader category filters. Prioritize markets that explicitly reference those terms.
+- When direct keyword hits are sparse, reason about adjacent concepts and add related keywords or category filters (e.g., a GPU shortage can affect AI model releases, data centers, cryptocurrency mining). Blend explicit keyword matching with relevant taxonomy levels (`market_category_*_name`) so the result set includes both direct and indirect markets.
 - For multi-keyword prompts ("Microsoft" and "OpenAI"), include all keywords in the WHERE clause. Use grouped conditions like `(LOWER(question) LIKE '%microsoft%' OR LOWER(description) LIKE '%microsoft%' OR LOWER(tags) LIKE '%microsoft%')` combined with `OR` for each entity, and add acquisition-related keywords when relevant (`LIKE '%acquire%'`, `'%acquisition%'`).
 - Combine keyword filters with relevant taxonomy levels (market_category*, market_category_*_name) so results stay on-topic (e.g., `market_category_l1_name = 'Politics' AND LOWER(question) LIKE '%russia%'`).
 - Only skip SQL when the request cannot be satisfied; in those cases, leave `sql` empty and request enrichment via `enrichment_hint`.
@@ -42,12 +43,15 @@ Core guidance:
 - Always set `top_n` to the number of markets you want to highlight (default 10, maximum 100).
 - After execution you must populate `final_table_rows` with exactly `top_n` dictionaries representing the markets you want displayed. Ensure the dictionaries include consistent column keys.
 - Always return valid JSON with keys: assistant_message, facts, suggested_sql_columns, enrichment_hint, sql, sql_variables, sql_batch, top_n, final_table_rows.
+- When prompts ask which markets are "affected", "impacted", "related", or "about" a given event or entity, retrieve a SELECT result set with at least 15–25 candidate markets (use `LIMIT 25`) that includes question text, liquidity_num, last_trade_price, end_date_iso, and taxonomy levels, then choose the strongest ones for `final_table_rows`.
 
 Example SQL patterns you can emit:
 - Top liquidity today: `SELECT question, liquidity_num, last_trade_price FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') ORDER BY liquidity_num DESC LIMIT 5`
 - Narrowest spread: `SELECT question, best_bid, best_ask, (best_ask - best_bid) AS spread FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND best_bid IS NOT NULL AND best_ask IS NOT NULL ORDER BY spread ASC LIMIT 5`
 - Russia-focused request: `SELECT question, liquidity_num, last_trade_price, market_category_l1_name FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND (LOWER(question) LIKE '%russia%' OR LOWER(description) LIKE '%russia%' OR LOWER(tags) LIKE '%russia%') ORDER BY liquidity_num DESC LIMIT 5`
 - Microsoft + OpenAI acquisition: `SELECT question, liquidity_num, last_trade_price FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND ((LOWER(question) LIKE '%microsoft%' OR LOWER(description) LIKE '%microsoft%' OR LOWER(tags) LIKE '%microsoft%') OR (LOWER(question) LIKE '%openai%' OR LOWER(description) LIKE '%openai%' OR LOWER(tags) LIKE '%openai%')) AND (LOWER(question) LIKE '%acquir%' OR LOWER(description) LIKE '%acquir%') ORDER BY liquidity_num DESC LIMIT 10`
+- Event impact prompt: `SELECT question, liquidity_num, last_trade_price, end_date_iso, market_category_l1_name FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND (LOWER(question) LIKE '%openai%' OR LOWER(description) LIKE '%openai%') AND (LOWER(question) LIKE '%launch%' OR LOWER(description) LIKE '%launch%') ORDER BY liquidity_num DESC LIMIT 25`
+- Derived impact example: `SELECT question, liquidity_num, last_trade_price, end_date_iso, market_category_l1_name FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') AND (LOWER(question) LIKE '%gpu%' OR LOWER(description) LIKE '%gpu%' OR LOWER(tags) LIKE '%gpu%' OR market_category_l2_name LIKE '%Artificial Intelligence%' OR market_category_l2_name LIKE '%Semiconductor%') AND (LOWER(question) LIKE '%shortage%' OR LOWER(description) LIKE '%shortage%' OR LOWER(question) LIKE '%supply%' OR LOWER(description) LIKE '%supply%') ORDER BY liquidity_num DESC LIMIT 25`
 """
 
 PROMPT_TEMPLATE = """
@@ -224,9 +228,18 @@ class GeminiClient:
         if not isinstance(parsed, dict):
             parsed = {"assistant_message": str(parsed)}
 
-        if not parsed.get("assistant_message") and not allow_empty:
-            self.logger.warning("Gemini response missing assistant_message; using fallback")
-            return self._fallback_response(user_message, columns)
+        assistant_message = parsed.get("assistant_message")
+        if not assistant_message:
+            if parsed.get("answer"):
+                parsed["assistant_message"] = parsed.get("answer", "")
+            elif parsed.get("sql") or parsed.get("sql_batch") or allow_empty:
+                truncated = user_message.strip().replace("\n", " ")[:120]
+                parsed["assistant_message"] = (
+                    f"Generated SQL plan for '{truncated}'" if truncated else "Generated SQL plan."
+                )
+            else:
+                self.logger.warning("Gemini response missing assistant_message; using fallback")
+                return self._fallback_response(user_message, columns)
 
         return parsed
 

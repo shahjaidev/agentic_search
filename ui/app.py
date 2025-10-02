@@ -422,7 +422,7 @@ def display_payload(payload: Dict[str, Any] | None, *, show_summary: bool = True
             unsafe_allow_html=True,
         )
 
-    rows = payload.get("sql_rows")
+    rows = payload.get("sql_rows") or payload.get("final_table_rows")
     if rows:
         caption = None
         if summary:
@@ -595,7 +595,10 @@ def fetch_history() -> None:
 
 def send_message(conversation_id: str, user_message: str) -> Dict[str, Any]:
     payload = {"conversation_id": conversation_id, "message": user_message}
-    resp = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=90)
+    try:
+        resp = requests.post(f"{API_BASE_URL}/chat", json=payload, timeout=90)
+    except requests.RequestException as exc:
+        raise RuntimeError(str(exc)) from exc
     if not resp.ok:
         raise RuntimeError(f"{resp.status_code} {resp.text}")
     return resp.json()

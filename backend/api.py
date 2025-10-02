@@ -91,136 +91,171 @@ async def chat(request: ChatRequest, session: Session = Depends(get_session)):
     gemini = get_gemini_client()
     conversation_history = debug_info["history"]
 
-    gemini_payload_raw = gemini.run_chat(available_columns, request.message, conversation_history)
-    debug_info["initial_gemini"] = gemini_payload_raw
-    try:
-        gemini_payload = GeminiResponse.coerce(gemini_payload_raw)
-    except ValueError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    missing_columns: list[str] = []
-    enrichment_messages: list[str] = []
-
-    if gemini_payload.sql:
-        sql_lower = gemini_payload.sql.lower()
-        for col in gemini_payload.suggested_sql_columns:
-            if col in available_columns:
-                continue
-            alias_pattern = f" as {col.lower()}"
-            if alias_pattern in sql_lower:
-                continue
-            missing_columns.append(col)
-    if gemini_payload.enrichment_hint:
-        missing_attr = gemini_payload.enrichment_hint.get("attribute")
-        if missing_attr and missing_attr not in available_columns:
-            missing_columns.append(missing_attr)
-
-    unique_missing = sorted(set(missing_columns))
-    enrichment_actions: list[EnrichmentAction] = []
-
-    if unique_missing:
-        debug_info["stage"] = "enriching"
-    for col in unique_missing:
-        note = f"Auto-enrichment requested to add column '{col}'."
-        job = crud.enqueue_enrichment(session, conversation, attribute=col, payload={}, notes=note)
-        job.status = "pending_external"
-        job.notes = "Awaiting external enrichment"
-        enrichment_messages.append(f"Queued enrichment for column '{col}'")
-        enrichment_actions.append(EnrichmentAction(attribute=col, reason=note))
-
-    updated_columns = crud.list_columns(session, TABLE_NAME)
-    debug_info.update(
-        {
-            "columns_after_enrichment": updated_columns,
-            "enrichment_messages": enrichment_messages,
-            "enrichment_actions": [action.model_dump() for action in enrichment_actions],
-            "pending_columns": unique_missing,
-        }
-    )
-
+    attempt = 0
+    max_attempts = 2
+    replan_logs: list[dict[str, Any]] = []
+    gemini_payload: GeminiResponse | None = None
+    plan: SqlPlan | None = None
     sql_results: List[Dict[str, Any]] = []
     batch_results: List[Dict[str, Any]] = []
     execution_summary = SqlExecutionResult()
-    plan: SqlPlan | None = None
-    top_n = max(1, min(gemini_payload.top_n or 10, 100))
+    enrichment_actions: list[EnrichmentAction] = []
+    enrichment_messages: list[str] = []
+    missing_after_enrichment: list[str] = []
+    top_n = 10
+    last_sql: str | None = None
 
-    missing_after_enrichment = [col for col in unique_missing if col not in updated_columns]
-    debug_info["pending_columns"] = missing_after_enrichment
-
-    if not gemini_payload.sql and not gemini_payload.sql_batch and unique_missing:
-        debug_info["stage"] = "awaiting_enrichment"
-
-    if gemini_payload.sql_batch:
-        debug_info["stage"] = "querying"
-        debug_info["plan"] = {
-            "type": "batch",
-            "top_n": top_n,
-            "queries": [item.model_dump() for item in gemini_payload.sql_batch],
-        }
-
-        if missing_after_enrichment:
-            debug_info["stage"] = "awaiting_enrichment"
-        else:
-            for idx, item in enumerate(gemini_payload.sql_batch, start=1):
-                statement = item.sql
-                params = item.sql_variables or {}
-                result_rows = crud.execute_sql(session, statement, params)
-                sql_results.extend(result_rows)
-                batch_entry = {
-                    "name": item.name or f"query_{idx}",
-                    "sql": statement,
-                    "row_count": len(result_rows),
-                    "rows": result_rows,
-                }
-                batch_results.append(batch_entry)
-                crud.add_query_log(
-                    session,
-                    conversation,
-                    statement,
-                    result_rows,
-                    available_columns,
-                    unique_missing,
-                )
-
-            execution_summary = SqlExecutionResult(
-                rows=sql_results,
-                row_count=len(sql_results),
-                preview_columns=list(sql_results[0].keys()) if sql_results else [],
+    while attempt < max_attempts:
+        prompt_message = request.message
+        if attempt > 0 and last_sql:
+            prompt_message = (
+                f"{request.message}\n\nThe previous SQL ({last_sql}) returned no rows. "
+                "Please broaden the search, adjust keywords, or try a different approach to surface relevant markets."
             )
-            debug_info["result_row_count"] = execution_summary.row_count
-            debug_info["batch_results_preview"] = [
-                {"name": entry["name"], "row_count": entry["row_count"]}
-                for entry in batch_results
-            ]
-
-    elif gemini_payload.sql:
+        gemini_payload_raw = gemini.run_chat(available_columns, prompt_message, conversation_history)
+        if attempt == 0:
+            debug_info["initial_gemini"] = gemini_payload_raw
+        else:
+            replan_logs.append({"attempt": attempt + 1, "payload": gemini_payload_raw})
         try:
-            plan = SqlPlan(
-                sql=gemini_payload.sql,
-                columns_considered=available_columns,
-                missing_columns=unique_missing,
-                suggested_columns=gemini_payload.suggested_sql_columns,
-            )
+            gemini_payload = GeminiResponse.coerce(gemini_payload_raw)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
-        debug_info["plan"] = plan.model_dump()
-        debug_info["stage"] = "querying"
+        missing_columns: list[str] = []
+        enrichment_messages = []
+        enrichment_actions = []
+        batch_results = []
+        sql_results = []
+        execution_summary = SqlExecutionResult()
+        plan = None
 
-        if missing_after_enrichment:
+        if gemini_payload.sql:
+            sql_lower = gemini_payload.sql.lower()
+            for col in gemini_payload.suggested_sql_columns:
+                if col in available_columns:
+                    continue
+                alias_pattern = f" as {col.lower()}"
+                if alias_pattern in sql_lower:
+                    continue
+                missing_columns.append(col)
+        if gemini_payload.enrichment_hint:
+            missing_attr = gemini_payload.enrichment_hint.get("attribute")
+            if missing_attr and missing_attr not in available_columns:
+                missing_columns.append(missing_attr)
+
+        unique_missing = sorted(set(missing_columns))
+        if unique_missing:
+            debug_info["stage"] = "enriching"
+        for col in unique_missing:
+            note = f"Auto-enrichment requested to add column '{col}'."
+            job = crud.enqueue_enrichment(session, conversation, attribute=col, payload={}, notes=note)
+            job.status = "pending_external"
+            job.notes = "Awaiting external enrichment"
+            enrichment_messages.append(f"Queued enrichment for column '{col}'")
+            enrichment_actions.append(EnrichmentAction(attribute=col, reason=note))
+
+        updated_columns = crud.list_columns(session, TABLE_NAME)
+        missing_after_enrichment = [col for col in unique_missing if col not in updated_columns]
+        debug_info.update(
+            {
+                "columns_after_enrichment": updated_columns,
+                "enrichment_messages": enrichment_messages,
+                "enrichment_actions": [action.model_dump() for action in enrichment_actions],
+                "pending_columns": missing_after_enrichment,
+            }
+        )
+
+        top_n = max(1, min(gemini_payload.top_n or 10, 100))
+
+        if not gemini_payload.sql and not gemini_payload.sql_batch and unique_missing:
             debug_info["stage"] = "awaiting_enrichment"
-        else:
-            params = gemini_payload.sql_variables or {}
-            sql_results = crud.execute_sql(session, plan.sql, params)
-            execution_summary = SqlExecutionResult(
-                rows=sql_results,
-                row_count=len(sql_results),
-                preview_columns=list(sql_results[0].keys()) if sql_results else [],
-            )
-            crud.add_query_log(session, conversation, plan.sql, sql_results, plan.columns_considered, plan.missing_columns)
-            debug_info["result_row_count"] = execution_summary.row_count
+            break
 
-    followup_message = gemini_payload.final_message()
+        if gemini_payload.sql_batch:
+            debug_info["stage"] = "querying"
+            debug_info["plan"] = {
+                "type": "batch",
+                "top_n": top_n,
+                "queries": [item.model_dump() for item in gemini_payload.sql_batch],
+            }
+
+            if missing_after_enrichment:
+                debug_info["stage"] = "awaiting_enrichment"
+            else:
+                for idx, item in enumerate(gemini_payload.sql_batch, start=1):
+                    statement = item.sql
+                    params = item.sql_variables or {}
+                    result_rows = crud.execute_sql(session, statement, params)
+                    sql_results.extend(result_rows)
+                    batch_entry = {
+                        "name": item.name or f"query_{idx}",
+                        "sql": statement,
+                        "row_count": len(result_rows),
+                        "rows": result_rows,
+                    }
+                    batch_results.append(batch_entry)
+                    crud.add_query_log(
+                        session,
+                        conversation,
+                        statement,
+                        result_rows,
+                        available_columns,
+                        unique_missing,
+                    )
+
+                execution_summary = SqlExecutionResult(
+                    rows=sql_results,
+                    row_count=len(sql_results),
+                    preview_columns=list(sql_results[0].keys()) if sql_results else [],
+                )
+                debug_info["result_row_count"] = execution_summary.row_count
+                debug_info["batch_results_preview"] = [
+                    {"name": entry["name"], "row_count": entry["row_count"]}
+                    for entry in batch_results
+                ]
+                last_sql = ", ".join(entry["sql"] for entry in batch_results)
+
+        elif gemini_payload.sql:
+            try:
+                plan = SqlPlan(
+                    sql=gemini_payload.sql,
+                    columns_considered=available_columns,
+                    missing_columns=unique_missing,
+                    suggested_columns=gemini_payload.suggested_sql_columns,
+                )
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+            debug_info["plan"] = plan.model_dump()
+            debug_info["stage"] = "querying"
+
+            if missing_after_enrichment:
+                debug_info["stage"] = "awaiting_enrichment"
+            else:
+                params = gemini_payload.sql_variables or {}
+                sql_results = crud.execute_sql(session, plan.sql, params)
+                execution_summary = SqlExecutionResult(
+                    rows=sql_results,
+                    row_count=len(sql_results),
+                    preview_columns=list(sql_results[0].keys()) if sql_results else [],
+                )
+                crud.add_query_log(session, conversation, plan.sql, sql_results, plan.columns_considered, plan.missing_columns)
+                debug_info["result_row_count"] = execution_summary.row_count
+                last_sql = plan.sql
+
+        if sql_results or batch_results or missing_after_enrichment or not gemini_payload.sql:
+            break
+
+        conversation_history = conversation_history + [
+            {"role": "assistant", "content": gemini_payload.assistant_message or ""}
+        ]
+        attempt += 1
+
+    if replan_logs:
+        debug_info["replan_attempts"] = replan_logs
+
+    followup_message = gemini_payload.final_message() if gemini_payload else ""
     followup_facts = gemini_payload.facts
     followup_raw = None
 
