@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, AsyncGenerator, Dict, List
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -26,6 +27,9 @@ from backend.schemas import (
     SqlPlan,
 )
 from backend.service_gemini import get_gemini_client
+from backend.service_weaviate import get_weaviate_service
+from backend.service_categorized_weaviate import get_categorized_weaviate_service
+from backend.config import settings
 
 TABLE_NAME = "polymarket_markets_enriched"
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
@@ -43,6 +47,21 @@ def append_chat_log(payload: Dict[str, Any]) -> None:
         logger.error("Failed to write chat log: %s", exc)
 
 
+def serialize_payload_for_db(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert datetime objects to strings for JSON serialization."""
+    def convert_datetime(obj):
+        if isinstance(obj, datetime):
+            return obj.isoformat()
+        elif isinstance(obj, dict):
+            return {k: convert_datetime(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [convert_datetime(item) for item in obj]
+        else:
+            return obj
+    
+    return convert_datetime(payload)
+
+
 def build_history_summary(conversation: models.Conversation) -> List[dict[str, str]]:
     summary = []
     for message in conversation.messages[-10:]:
@@ -50,17 +69,129 @@ def build_history_summary(conversation: models.Conversation) -> List[dict[str, s
     return summary
 
 
-app = FastAPI(title="Agentic Search Backend", version="0.2.0")
+def get_semantic_market_context(user_query: str, limit: int = 10) -> List[Dict[str, Any]]:
+    """Get relevant markets using semantic search to supplement SQL results."""
+    global _categorized_weaviate_service, _weaviate_service
+    
+    try:
+        # Try categorized Weaviate service first (preferred)
+        categorized_service = _categorized_weaviate_service or get_categorized_weaviate_service()
+        if categorized_service.enabled:
+            logger.info("Using categorized Weaviate service for semantic search")
+            semantic_results = categorized_service.search_markets(
+                query=user_query,
+                limit=limit,
+                active_only=True
+            )
+            
+            # Enhance results with additional metadata
+            enhanced_results = []
+            for result in semantic_results:
+                enhanced_result = result.copy()
+                # Add semantic search source
+                enhanced_result["search_source"] = "categorized_weaviate"
+                # Ensure we have a relevance score
+                if "relevance_score" not in enhanced_result and "distance" in enhanced_result:
+                    enhanced_result["relevance_score"] = 1 - enhanced_result["distance"] if enhanced_result["distance"] else 1.0
+                enhanced_results.append(enhanced_result)
+            
+            logger.info(f"Categorized semantic search returned {len(enhanced_results)} relevant markets")
+            return enhanced_results
+        
+        # Fallback to original Weaviate service
+        weaviate_service = _weaviate_service or get_weaviate_service()
+        if not weaviate_service.enabled:
+            logger.info("No Weaviate services enabled, skipping semantic search")
+            return []
+        
+        logger.info("Using original Weaviate service for semantic search")
+        semantic_results = weaviate_service.search_markets(
+            query=user_query,
+            limit=limit,
+            active_only=True
+        )
+        
+        # Add source metadata
+        for result in semantic_results:
+            result["search_source"] = "original_weaviate"
+        
+        logger.info(f"Original semantic search returned {len(semantic_results)} relevant markets")
+        return semantic_results
+        
+    except Exception as e:
+        logger.error(f"Error in semantic search: {e}")
+        return []
 
 
-@app.on_event("startup")
-def startup_event() -> None:
+# Global variables to store service instances for proper cleanup
+_weaviate_service = None
+_categorized_weaviate_service = None
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Manage application lifespan events."""
+    global _weaviate_service, _categorized_weaviate_service
+    
+    # Startup
+    logger.info("Starting up Agentic Search Backend...")
     Base.metadata.create_all(bind=engine)
+    
+    # Initialize services for proper connection management
+    _weaviate_service = get_weaviate_service()
+    _categorized_weaviate_service = get_categorized_weaviate_service()
+    
+    logger.info("Application startup complete")
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down Agentic Search Backend...")
+    
+    # Close Weaviate connections properly
+    if _weaviate_service:
+        _weaviate_service.close()
+    if _categorized_weaviate_service:
+        _categorized_weaviate_service.close()
+    
+    logger.info("Application shutdown complete")
+
+
+app = FastAPI(
+    title="Agentic Search Backend", 
+    version="0.2.0",
+    lifespan=lifespan
+)
+
+# Add CORS middleware to allow requests from Streamlit
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:8501", "http://localhost:*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 @app.get("/health", tags=["core"])
 async def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/health/weaviate", tags=["core"])
+async def weaviate_health() -> dict[str, Any]:
+    """Check Weaviate connection health."""
+    global _weaviate_service
+    weaviate_service = _weaviate_service or get_weaviate_service()
+    return weaviate_service.health_check()
+
+
+@app.get("/health/weaviate/categorized", tags=["core"])
+async def categorized_weaviate_health() -> dict[str, Any]:
+    """Check categorized Weaviate connection health."""
+    global _categorized_weaviate_service
+    categorized_service = _categorized_weaviate_service or get_categorized_weaviate_service()
+    return categorized_service.health_check()
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["chat"])
@@ -90,6 +221,12 @@ async def chat(request: ChatRequest, session: Session = Depends(get_session)):
 
     gemini = get_gemini_client()
     conversation_history = debug_info["history"]
+
+    # Get semantic search context for the user query
+    semantic_markets = get_semantic_market_context(request.message, limit=10)
+    debug_info["semantic_search_results"] = semantic_markets
+    debug_info["semantic_search_count"] = len(semantic_markets)
+    debug_info["semantic_search_source"] = semantic_markets[0].get("search_source", "none") if semantic_markets else "none"
 
     attempt = 0
     max_attempts = 2
@@ -275,6 +412,8 @@ async def chat(request: ChatRequest, session: Session = Depends(get_session)):
             "pending_columns": debug_info.get("pending_columns", []),
             "batch_results": batch_results,
             "top_n": top_n,
+            "semantic_search_results": semantic_markets,
+            "semantic_search_count": len(semantic_markets),
         }
         future_market_names: list[str] = []
         if FUTURE_MARKET_CONTEXT_LIMIT > 0:
@@ -334,17 +473,21 @@ async def chat(request: ChatRequest, session: Session = Depends(get_session)):
         final_table_rows=sql_results[:top_n] if sql_results else [],
         debug=debug_info,
     )
+    
+    # Add semantic search results to the response for frontend access
+    if semantic_markets:
+        response_payload.debug["semantic_results"] = semantic_markets[:5]  # Top 5 for frontend
 
     crud.add_message(
         session,
         conversation,
         role="assistant",
         content=followup_message,
-        payload=response_payload.model_dump(),
+        payload=serialize_payload_for_db(response_payload.model_dump()),
     )
 
     log_entry = {
-        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "conversation_id": conversation.id,
         "user_message": request.message,
         "plan": plan.model_dump() if plan else None,
@@ -414,3 +557,5 @@ def build_sql_summary(plan: SqlPlan, execution: SqlExecutionResult) -> str:
         remaining = execution.row_count - len(preview_rows)
         lines.append(f"…and {remaining} more rows.")
     return "\n".join(lines)
+
+

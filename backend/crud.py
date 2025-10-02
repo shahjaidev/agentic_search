@@ -60,7 +60,7 @@ def add_message(
         role=role,
         content=content,
         payload=payload,
-        created_at=datetime.utcnow(),
+        created_at=datetime.now(timezone.utc),
     )
     session.add(message)
     session.flush()
@@ -90,7 +90,7 @@ def mark_enrichment_complete(session: Session, job: models.EnrichmentJob, notes:
     job.status = "complete"
     if notes:
         job.notes = notes
-    job.updated_at = datetime.utcnow()
+    job.updated_at = datetime.now(timezone.utc)
     session.add(job)
 
 
@@ -120,7 +120,7 @@ def get_query_logs(session: Session, conversation: models.Conversation) -> list[
 
 
 def generate_conversation_id() -> str:
-    return datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    return datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S%f")
 
 
 def serialize_messages(messages: Iterable[models.Message]) -> list[dict]:

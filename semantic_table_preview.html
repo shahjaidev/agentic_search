@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Semantic Search Results Table Preview</title>
+    <style>
+        body {
+            font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            background: #f8fafc;
+            padding: 2rem;
+            margin: 0;
+        }
+
+        .semantic-table-container {
+            margin-top: 0.75rem;
+            border-radius: 1.2rem;
+            background: linear-gradient(135deg, rgba(236, 254, 255, 0.95), rgba(224, 242, 254, 0.9));
+            border: 1px solid rgba(14, 165, 233, 0.25);
+            box-shadow: 0 8px 24px rgba(14, 165, 233, 0.12);
+            overflow: hidden;
+            max-width: 1200px;
+        }
+
+        .semantic-table-header {
+            padding: 1rem 1.2rem 0.8rem 1.2rem;
+            background: linear-gradient(135deg, rgba(14, 165, 233, 0.08), rgba(59, 130, 246, 0.06));
+            border-bottom: 1px solid rgba(14, 165, 233, 0.15);
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .semantic-table-icon {
+            font-size: 1.1rem;
+        }
+
+        .semantic-table-title {
+            font-weight: 600;
+            color: rgba(14, 116, 144, 0.9);
+            font-size: 0.95rem;
+            letter-spacing: 0.02em;
+        }
+
+        .semantic-table-count {
+            color: rgba(71, 85, 105, 0.7);
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+
+        .semantic-table-wrapper {
+            overflow-x: auto;
+            padding: 0;
+        }
+
+        .semantic-results-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 0.88rem;
+        }
+
+        .semantic-results-table thead th {
+            background: rgba(255, 255, 255, 0.9);
+            color: #1e40af;
+            font-weight: 600;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.02em;
+            padding: 0.8rem 1rem;
+            text-align: left;
+            border-bottom: 2px solid rgba(14, 165, 233, 0.2);
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+
+        .semantic-results-table tbody td {
+            padding: 0.9rem 1rem;
+            border-bottom: 1px solid rgba(14, 165, 233, 0.1);
+            vertical-align: middle;
+        }
+
+        .semantic-results-table tbody tr:nth-child(odd) {
+            background: rgba(255, 255, 255, 0.6);
+        }
+
+        .semantic-results-table tbody tr:nth-child(even) {
+            background: rgba(248, 250, 255, 0.8);
+        }
+
+        .semantic-results-table tbody tr:hover {
+            background: rgba(191, 219, 254, 0.4);
+            transform: translateY(-1px);
+            transition: all 0.2s ease;
+        }
+
+        .rank-col {
+            width: 50px;
+            text-align: center;
+        }
+
+        .question-col {
+            width: 45%;
+            min-width: 300px;
+        }
+
+        .score-col {
+            width: 100px;
+            text-align: center;
+        }
+
+        .source-col {
+            width: 120px;
+            text-align: center;
+        }
+
+        .category-col {
+            width: 15%;
+            min-width: 120px;
+        }
+
+        .semantic-rank {
+            font-weight: 600;
+            color: rgba(71, 85, 105, 0.8);
+            text-align: center;
+            font-size: 0.85rem;
+        }
+
+        .semantic-question {
+            color: #0f172a;
+            font-weight: 500;
+            line-height: 1.4;
+        }
+
+        .semantic-score {
+            text-align: center;
+        }
+
+        .semantic-score-badge {
+            background: linear-gradient(135deg, rgba(34, 197, 94, 0.15), rgba(22, 163, 74, 0.12));
+            color: #15803d;
+            padding: 0.25rem 0.6rem;
+            border-radius: 1rem;
+            font-weight: 600;
+            font-size: 0.8rem;
+            border: 1px solid rgba(34, 197, 94, 0.2);
+            display: inline-block;
+        }
+
+        .semantic-source {
+            text-align: center;
+        }
+
+        .semantic-source-pill {
+            background: rgba(99, 102, 241, 0.12);
+            color: #4338ca;
+            padding: 0.2rem 0.5rem;
+            border-radius: 0.8rem;
+            font-weight: 500;
+            font-size: 0.75rem;
+            border: 1px solid rgba(99, 102, 241, 0.2);
+            display: inline-block;
+        }
+
+        .semantic-category-cell {
+            color: rgba(75, 85, 99, 0.9);
+            font-style: italic;
+            font-size: 0.8rem;
+        }
+    </style>
+</head>
+<body>
+    <h1>Semantic Search Results - New Table Design</h1>
+    
+    <div class="semantic-table-container">
+        <div class="semantic-table-header">
+            <span class="semantic-table-icon">🔍</span>
+            <span class="semantic-table-title">Semantic Search Results</span>
+            <span class="semantic-table-count">(5 found)</span>
+        </div>
+        <div class="semantic-table-wrapper">
+            <table class="semantic-results-table">
+                <thead>
+                    <tr>
+                        <th class="rank-col">#</th>
+                        <th class="question-col">Market Question</th>
+                        <th class="score-col">Relevance</th>
+                        <th class="source-col">Source</th>
+                        <th class="category-col">Category</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    <tr>
+                        <td class="semantic-rank">#1</td>
+                        <td class="semantic-question">Will Bitcoin reach $100,000 by the end of 2024?</td>
+                        <td class="semantic-score">
+                            <span class="semantic-score-badge">87.3%</span>
+                        </td>
+                        <td class="semantic-source">
+                            <span class="semantic-source-pill">Categorized</span>
+                        </td>
+                        <td class="semantic-category-cell">Cryptocurrency</td>
+                    </tr>
+                    <tr>
+                        <td class="semantic-rank">#2</td>
+                        <td class="semantic-question">Will Ethereum surpass Bitcoin in market cap by 2025?</td>
+                        <td class="semantic-score">
+                            <span class="semantic-score-badge">82.1%</span>
+                        </td>
+                        <td class="semantic-source">
+                            <span class="semantic-source-pill">Categorized</span>
+                        </td>
+                        <td class="semantic-category-cell">Cryptocurrency</td>
+                    </tr>
+                    <tr>
+                        <td class="semantic-rank">#3</td>
+                        <td class="semantic-question">Will a Bitcoin ETF be approved by the SEC in 2024?</td>
+                        <td class="semantic-score">
+                            <span class="semantic-score-badge">79.8%</span>
+                        </td>
+                        <td class="semantic-source">
+                            <span class="semantic-source-pill">Categorized</span>
+                        </td>
+                        <td class="semantic-category-cell">Finance</td>
+                    </tr>
+                    <tr>
+                        <td class="semantic-rank">#4</td>
+                        <td class="semantic-question">Will Dogecoin reach $1 by the end of 2024?</td>
+                        <td class="semantic-score">
+                            <span class="semantic-score-badge">71.5%</span>
+                        </td>
+                        <td class="semantic-source">
+                            <span class="semantic-source-pill">Standard</span>
+                        </td>
+                        <td class="semantic-category-cell">Cryptocurrency</td>
+                    </tr>
+                    <tr>
+                        <td class="semantic-rank">#5</td>
+                        <td class="semantic-question">Will crypto regulation be passed in the US this year?</td>
+                        <td class="semantic-score">
+                            <span class="semantic-score-badge">68.2%</span>
+                        </td>
+                        <td class="semantic-source">
+                            <span class="semantic-source-pill">Categorized</span>
+                        </td>
+                        <td class="semantic-category-cell">Politics</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <p style="margin-top: 2rem; color: #64748b; font-size: 0.9rem;">
+        This is a preview of how the semantic search results will appear in the Streamlit frontend.
+        The table features:
+    </p>
+    <ul style="color: #64748b; font-size: 0.9rem;">
+        <li><strong>Ranking:</strong> Clear numerical ranking of results</li>
+        <li><strong>Relevance Scores:</strong> Green badges showing percentage relevance</li>
+        <li><strong>Source Indicators:</strong> Purple pills showing Categorized vs Standard Weaviate</li>
+        <li><strong>Categories:</strong> Italic text showing market categories</li>
+        <li><strong>Hover Effects:</strong> Subtle animations on row hover</li>
+        <li><strong>Responsive Design:</strong> Horizontal scrolling for smaller screens</li>
+    </ul>
+</body>
+</html>

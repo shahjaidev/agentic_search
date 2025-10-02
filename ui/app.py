@@ -10,10 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pandas as pd
 import requests
 import streamlit as st
 
-API_BASE_URL = "http://localhost:8001"
+API_BASE_URL = "http://localhost:8000"
 LOG_FILE_PATH = Path(__file__).resolve().parent.parent / "logs" / "chat_runs.jsonl"
 CUSTOM_CSS = """
 <style>
@@ -166,77 +167,7 @@ div[data-testid="stToolbar"] {
 }
 
 
-.table-block {
-    margin-top: 0.75rem;
-    border-radius: 1.1rem;
-    border: 1px solid rgba(203, 213, 225, 0.8);
-    background: rgba(255, 255, 255, 0.98);
-    box-shadow: 0 22px 48px rgba(148, 163, 184, 0.25);
-    overflow: hidden;
-    width: 100%;
-}
-
-.table-caption {
-    display: block;
-    padding: 0.9rem 1.2rem 0 1.2rem;
-    color: rgba(79, 70, 229, 0.75);
-    font-size: 0.85rem;
-    letter-spacing: 0.03em;
-    text-transform: uppercase;
-}
-
-
-.table-container {
-    overflow-x: auto;
-    padding: 0.6rem 1.2rem 1.1rem 1.2rem;
-    width: 100%;
-}
-
-
-.table-container table {
-    width: 100%;
-    min-width: 780px;
-    border-collapse: separate;
-    border-spacing: 0;
-    font-size: 0.92rem;
-}
-
-.table-container thead th {
-    position: sticky;
-    top: 0;
-    z-index: 1;
-    background: rgba(219, 234, 254, 0.95);
-    color: #1e3a8a;
-    text-transform: none;
-    font-weight: 600;
-}
-
-.table-container th,
-.table-container td {
-    padding: 0.65rem 0.9rem;
-    border-bottom: 1px solid rgba(209, 213, 219, 0.8);
-    text-align: left;
-    color: #1f2937;
-    white-space: nowrap;
-}
-
-.table-container td {
-    font-weight: 400;
-    white-space: normal;
-    word-break: break-word;
-}
-
-.table-container tbody tr:nth-child(odd) {
-    background: rgba(248, 250, 255, 0.96);
-}
-
-.table-container tbody tr:nth-child(even) {
-    background: rgba(237, 242, 255, 0.94);
-}
-
-.table-container tbody tr:hover {
-    background: rgba(191, 219, 254, 0.7);
-}
+/* Table styles are now handled inline with Streamlit dataframes */
 
 [data-testid="stChatMessage"] {
     margin-bottom: 1.2rem;
@@ -320,6 +251,9 @@ button[kind="primary"], button[kind="secondary"] {
     color: inherit !important;
     box-shadow: none !important;
 }
+
+
+/* Semantic search table styles are now handled inline with Streamlit dataframes */
 </style>
 """
 
@@ -339,8 +273,7 @@ def render_header() -> None:
     st.markdown(
         """
         <div class="hero-card">
-            <h1>The Search Intelligence Company</h1>
-            <p>providing perfect context for your agentic research tasks</p>
+            <h1>NthOrder: Prediction Market Discovery Engine</h1>
         </div>
         """,
         unsafe_allow_html=True,
@@ -400,11 +333,155 @@ def render_bubble(text: str, bubble_class: str) -> str:
     return f'<div class="chat-bubble {bubble_class}">{safe_text}</div>'
 
 
+def get_category_name(category_code: str) -> str:
+    """Convert category code to readable name."""
+    category_mapping = {
+        "2.1.1": "US Politics - Elections",
+        "2.1.2": "US Politics - Government",
+        "2.1.3": "International Politics",
+        "2.2.1": "Economics - Markets",
+        "2.2.2": "Economics - Policy",
+        "3.1.1": "Technology - AI/ML",
+        "3.1.2": "Technology - Crypto",
+        "4.1.1": "Sports",
+        "5.1.1": "Entertainment",
+        "6.1.1": "Science",
+        # Add more mappings as needed
+    }
+    return category_mapping.get(category_code, category_code)
+
+
+def render_semantic_results_table(semantic_results: List[Dict[str, Any]]) -> None:
+    """Render semantic search results as a beautiful Streamlit table."""
+    if not semantic_results:
+        return
+    
+    # Create header
+    st.markdown(
+        f"""
+        <div style="
+            background: linear-gradient(135deg, rgba(236, 254, 255, 0.95), rgba(224, 242, 254, 0.9));
+            border: 1px solid rgba(14, 165, 233, 0.25);
+            border-radius: 12px 12px 0 0;
+            padding: 12px 16px;
+            margin-top: 12px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        ">
+            <span style="font-size: 18px;">🔍</span>
+            <span style="font-weight: 600; color: rgba(14, 116, 144, 0.9); font-size: 15px;">
+                Semantic Search Results
+            </span>
+            <span style="color: rgba(71, 85, 105, 0.7); font-size: 13px; font-weight: 500;">
+                ({len(semantic_results)} found)
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Prepare data for Streamlit table
+    table_data = []
+    for i, result in enumerate(semantic_results, 1):
+        question = result.get("question", "")
+        relevance_score = result.get("relevance_score", 0)
+        search_source = result.get("search_source", "weaviate")
+        category = result.get("category", "") or result.get("market_category_name", "")
+        
+        # Format relevance score as percentage
+        score_display = f"{relevance_score * 100:.1f}%" if relevance_score else "N/A"
+        
+        # Create source display
+        source_display = "Categorized" if "categorized" in search_source else "Standard"
+        
+        # Truncate long questions for table display
+        display_question = question if len(question) <= 80 else question[:77] + "..."
+        
+        # Create category display with readable name
+        category_display = get_category_name(category) if category else "—"
+        
+        table_data.append({
+            "#": f"#{i}",
+            "Market Question": display_question,
+            "Relevance": score_display,
+            "Source": source_display,
+            "Category": category_display
+        })
+    
+    # Display as Streamlit dataframe with custom styling
+    df = pd.DataFrame(table_data)
+    
+    # Custom CSS for the dataframe
+    st.markdown(
+        """
+        <style>
+        .stDataFrame {
+            border: 1px solid rgba(14, 165, 233, 0.25) !important;
+            border-top: none !important;
+            border-radius: 0 0 12px 12px !important;
+            overflow: hidden !important;
+        }
+        .stDataFrame > div {
+            border-radius: 0 0 12px 12px !important;
+        }
+        .stDataFrame table {
+            background: rgba(255, 255, 255, 0.9) !important;
+        }
+        .stDataFrame thead th {
+            background: rgba(219, 234, 254, 0.8) !important;
+            color: #1e40af !important;
+            font-weight: 600 !important;
+            font-size: 13px !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.5px !important;
+            border-bottom: 2px solid rgba(14, 165, 233, 0.2) !important;
+        }
+        .stDataFrame tbody tr:nth-child(odd) {
+            background: rgba(255, 255, 255, 0.6) !important;
+        }
+        .stDataFrame tbody tr:nth-child(even) {
+            background: rgba(248, 250, 255, 0.8) !important;
+        }
+        .stDataFrame tbody tr:hover {
+            background: rgba(191, 219, 254, 0.4) !important;
+        }
+        .stDataFrame tbody td {
+            font-size: 14px !important;
+            padding: 12px 8px !important;
+            border-bottom: 1px solid rgba(14, 165, 233, 0.1) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Display the dataframe
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "#": st.column_config.TextColumn(width="small"),
+            "Market Question": st.column_config.TextColumn(width="large"),
+            "Relevance": st.column_config.TextColumn(width="small"),
+            "Source": st.column_config.TextColumn(width="medium"),
+            "Category": st.column_config.TextColumn(width="medium")
+        }
+    )
+
+
 def display_payload(payload: Dict[str, Any] | None, *, show_summary: bool = True) -> None:
     if not payload:
         return
 
     summary = payload.get("sql_summary") or payload.get("assistant_message")
+
+    # Display semantic search results if available
+    debug_info = payload.get("debug", {})
+    semantic_results = debug_info.get("semantic_results", [])
+    if semantic_results:
+        render_semantic_results_table(semantic_results)
 
     if facts := payload.get("facts"):
         facts_markup = "".join(
@@ -428,19 +505,58 @@ def display_payload(payload: Dict[str, Any] | None, *, show_summary: bool = True
         if summary:
             caption = summary
             summary = ""
-        st.markdown(render_sql_table(rows, caption=caption), unsafe_allow_html=True)
+        render_sql_table(rows, caption=caption)
         return
 
     if summary and show_summary:
         st.markdown(render_bubble(summary, "assistant-bubble"), unsafe_allow_html=True)
 
 
-def render_sql_table(rows: List[Dict[str, Any]], caption: str | None = None) -> str:
+def render_sql_table(rows: List[Dict[str, Any]], caption: str | None = None) -> None:
+    """Render SQL results as a beautiful Streamlit table."""
     if not rows:
-        return ""
+        return
 
+    # Create header with caption
+    if caption:
+        st.markdown(
+            f"""
+            <div style="
+                background: linear-gradient(135deg, rgba(219, 234, 254, 0.95), rgba(191, 219, 254, 0.9));
+                border: 1px solid rgba(59, 130, 246, 0.25);
+                border-radius: 12px 12px 0 0;
+                padding: 12px 16px;
+                margin-top: 12px;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            ">
+                <span style="font-size: 18px;">📊</span>
+                <span style="font-weight: 600; color: rgba(30, 64, 175, 0.9); font-size: 15px;">
+                    Query Results
+                </span>
+                <span style="color: rgba(71, 85, 105, 0.7); font-size: 13px; font-weight: 500;">
+                    ({len(rows)} rows)
+                </span>
+            </div>
+            <div style="
+                background: rgba(255, 255, 255, 0.9);
+                border: 1px solid rgba(59, 130, 246, 0.25);
+                border-top: none;
+                padding: 12px 16px;
+                font-size: 14px;
+                color: #374151;
+                line-height: 1.5;
+            ">
+                {html.escape(caption)}
+            </div>
+            """,
+            unsafe_allow_html=True
+        )
+
+    # Filter out description column and normalize data
     columns = [col for col in rows[0].keys() if col.lower() != "description"]
-
+    
     def _normalize(value: Any) -> str:
         if value is None:
             return ""
@@ -456,23 +572,66 @@ def render_sql_table(rows: List[Dict[str, Any]], caption: str | None = None) -> 
             return stripped
         return str(value)
 
-    header_cells = "".join(f"<th>{html.escape(str(col))}</th>" for col in columns)
-    body_rows = []
+    # Prepare data for Streamlit table
+    table_data = []
     for row in rows:
-        cells = "".join(
-            f"<td>{html.escape(_normalize(row.get(col, '')))}</td>" for col in columns
-        )
-        body_rows.append(f"<tr>{cells}</tr>")
-    body_html = "".join(body_rows)
-    caption_html = f"<span class='table-caption'>{html.escape(caption)}</span>" if caption else ""
-    return (
-        "<div class='table-block'>"
-        + caption_html
-        + "<div class='table-container'><table><thead><tr>"
-        + header_cells
-        + "</tr></thead><tbody>"
-        + body_html
-        + "</tbody></table></div></div>"
+        normalized_row = {}
+        for col in columns:
+            normalized_row[col] = _normalize(row.get(col, ''))
+        table_data.append(normalized_row)
+    
+    # Create DataFrame
+    df = pd.DataFrame(table_data)
+    
+    # Custom CSS for the SQL results dataframe
+    st.markdown(
+        """
+        <style>
+        .stDataFrame {
+            border: 1px solid rgba(59, 130, 246, 0.25) !important;
+            border-top: none !important;
+            border-radius: 0 0 12px 12px !important;
+            overflow: hidden !important;
+        }
+        .stDataFrame > div {
+            border-radius: 0 0 12px 12px !important;
+        }
+        .stDataFrame table {
+            background: rgba(255, 255, 255, 0.9) !important;
+        }
+        .stDataFrame thead th {
+            background: rgba(219, 234, 254, 0.8) !important;
+            color: #1e40af !important;
+            font-weight: 600 !important;
+            font-size: 13px !important;
+            text-transform: uppercase !important;
+            letter-spacing: 0.5px !important;
+            border-bottom: 2px solid rgba(59, 130, 246, 0.2) !important;
+        }
+        .stDataFrame tbody tr:nth-child(odd) {
+            background: rgba(255, 255, 255, 0.6) !important;
+        }
+        .stDataFrame tbody tr:nth-child(even) {
+            background: rgba(248, 250, 255, 0.8) !important;
+        }
+        .stDataFrame tbody tr:hover {
+            background: rgba(191, 219, 254, 0.4) !important;
+        }
+        .stDataFrame tbody td {
+            font-size: 14px !important;
+            padding: 12px 8px !important;
+            border-bottom: 1px solid rgba(59, 130, 246, 0.1) !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
+    )
+    
+    # Display the dataframe
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True
     )
 
 
@@ -548,6 +707,15 @@ def render_debug_block(payload: Dict[str, Any]) -> None:
             result_count = debug_payload.get("result_row_count")
             if result_count is not None:
                 st.write(f"Result row count: {result_count}")
+            
+            # Show semantic search information
+            semantic_count = debug_payload.get("semantic_search_count", 0)
+            semantic_source = debug_payload.get("semantic_search_source", "none")
+            if semantic_count > 0:
+                st.write(f"**Semantic Search:** {semantic_count} results from {semantic_source}")
+                if semantic_results := debug_payload.get("semantic_search_results", []):
+                    st.markdown("**Full Semantic Search Results**")
+                    st.json(semantic_results)
         pending_cols = debug_payload.get("pending_columns", [])
         if pending_cols:
             st.write("**Pending columns for enrichment**")
@@ -662,6 +830,8 @@ def load_logs_by_conversation() -> Dict[str, List[Dict[str, Any]]]:
     return grouped
 
 
+
+
 def render_logs_tab() -> None:
     st.subheader("Conversation Logs")
     log_groups = load_logs_by_conversation()
@@ -757,6 +927,18 @@ def render_logs_tab() -> None:
 
             debug_payload = record.get("debug")
             if debug_payload:
+                # Show semantic search summary first
+                semantic_count = debug_payload.get("semantic_search_count", 0)
+                semantic_source = debug_payload.get("semantic_search_source", "none")
+                if semantic_count > 0:
+                    st.markdown("**Semantic Search Summary**")
+                    st.write(f"- Found {semantic_count} results from {semantic_source}")
+                    if semantic_results := debug_payload.get("semantic_search_results", []):
+                        for i, result in enumerate(semantic_results[:3], 1):  # Show top 3
+                            question = result.get("question", "")[:100] + "..." if len(result.get("question", "")) > 100 else result.get("question", "")
+                            score = result.get("relevance_score", 0)
+                            st.write(f"  {i}. {question} (Score: {score*100:.1f}%)")
+                
                 st.markdown("**Debug Payload**")
                 st.json(debug_payload)
 
@@ -774,6 +956,7 @@ def main() -> None:
     with chat_tab:
         render_header()
         render_messages(show_debug=show_debug)
+
         user_input = st.chat_input("Ask something…")
         if user_input:
             handle_user_input(user_input)

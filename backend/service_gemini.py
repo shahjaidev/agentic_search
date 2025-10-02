@@ -7,7 +7,10 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+import google.genai
 import google.generativeai as genai
+from opik import configure
+from opik.integrations.genai import track_genai
 
 from backend.config import settings
 from backend.schemas import SqlPlan
@@ -37,13 +40,19 @@ Core guidance:
 - Only skip SQL when the request cannot be satisfied; in those cases, leave `sql` empty and request enrichment via `enrichment_hint`.
 - Suggest additional columns only when they would genuinely improve the result.
 - Keep results limited to active markets by ensuring `end_date_iso > DATE('now')` whenever that column is involved, and cap row counts at 30 or fewer.
-- Treat executed SQL results as the authoritative source; summarize them first, then optionally add complementary context using other future-dated market names that match the user’s intent.
+- Treat executed SQL results as the authoritative source; summarize them first, then optionally add complementary context using other future-dated market names that match the user's intent.
 - For references to specific markets, map them into the taxonomy levels (market_category, market_category_l1, market_category_l2, market_category_l3) and combine category matching with case-insensitive keyword filters on question/description fields.
 - You may request multiple SQL statements by returning `sql_batch` (array of objects with optional `name`, required `sql`, and optional `sql_variables`). Statements execute sequentially and their outputs will be returned to you.
 - Always set `top_n` to the number of markets you want to highlight (default 10, maximum 100).
 - After execution you must populate `final_table_rows` with exactly `top_n` dictionaries representing the markets you want displayed. Ensure the dictionaries include consistent column keys.
 - Always return valid JSON with keys: assistant_message, facts, suggested_sql_columns, enrichment_hint, sql, sql_variables, sql_batch, top_n, final_table_rows.
 - When prompts ask which markets are "affected", "impacted", "related", or "about" a given event or entity, retrieve a SELECT result set with at least 15–25 candidate markets (use `LIMIT 25`) that includes question text, liquidity_num, last_trade_price, end_date_iso, and taxonomy levels, then choose the strongest ones for `final_table_rows`.
+
+Semantic Search Integration:
+- When additional context is provided via `semantic_search_results`, use these semantically relevant markets to enhance your understanding of the user's query.
+- These markets are found using vector similarity search and may include markets that don't match exact keyword filters but are semantically related to the user's question.
+- Incorporate insights from semantic search results into your answer when they provide valuable context, even if they don't appear in the SQL results.
+- Use semantic search results to suggest related markets or provide broader context about market trends and themes.
 
 Example SQL patterns you can emit:
 - Top liquidity today: `SELECT question, liquidity_num, last_trade_price FROM polymarket_markets_enriched WHERE end_date_iso > DATE('now') ORDER BY liquidity_num DESC LIMIT 5`
@@ -77,6 +86,9 @@ Result rows (JSON):
 Additional context:
 {context}
 
+Semantic search results (if available):
+{semantic_context}
+
 Chat history (most recent first):
 {history}
 
@@ -96,8 +108,26 @@ class GeminiClient:
         self.last_answer_prompt: Optional[str] = None
         self.last_answer_response_text: Optional[str] = None
 
+        # Configure Opik if API key is available
+        if settings.opik_api_key:
+            # Set project name in environment for Opik to pick up
+            import os
+            if settings.opik_project:
+                os.environ["OPIK_PROJECT_NAME"] = settings.opik_project
+            configure(api_key=settings.opik_api_key, workspace=settings.opik_workspace or "shahjaidev")
+
         if self.enabled:
+            # Use both the old genai client for backward compatibility and new google.genai for Opik
             genai.configure(api_key=self.api_key)
+            
+            # Create new google.genai client with Opik tracking
+            self.genai_client = google.genai.Client(api_key=self.api_key)
+            if settings.opik_api_key:
+                self.tracked_client = track_genai(self.genai_client)
+            else:
+                self.tracked_client = self.genai_client
+            
+            # Keep the old model for backward compatibility
             self.model = genai.GenerativeModel(
                 model_name=self.model_name,
                 system_instruction=SYSTEM_INSTRUCTION,
@@ -109,6 +139,8 @@ class GeminiClient:
             )
         else:
             self.model = None
+            self.genai_client = None
+            self.tracked_client = None
 
     def run_chat(self, columns: List[str], user_message: str, history: List[Dict[str, str]] | None = None) -> Dict[str, Any]:
         formatted_history_lines = []
@@ -130,6 +162,7 @@ class GeminiClient:
             return fallback
 
         try:
+            # Always use the old model for now since Opik integration may be causing issues
             response = self.model.generate_content(prompt)
             self.last_chat_response_text = getattr(response, "text", None)
         except Exception as exc:  # pragma: no cover - defensive fallback
@@ -158,10 +191,26 @@ class GeminiClient:
             content = item.get("content", "")
             formatted_history_lines.append(f"- {role}: {content}")
         formatted_history = "\n".join(formatted_history_lines)
+        
+        # Format semantic search results
+        semantic_results = context.get("semantic_search_results", [])
+        semantic_context = ""
+        if semantic_results:
+            semantic_context = f"Found {len(semantic_results)} semantically relevant markets:\n"
+            for i, market in enumerate(semantic_results[:3], 1):  # Show top 3
+                semantic_context += f"{i}. {market.get('question', 'N/A')}\n"
+                semantic_context += f"   Category: {market.get('market_category_name', 'N/A')}\n"
+                semantic_context += f"   Relevance: {market.get('relevance_score', 'N/A'):.3f}\n"
+                if market.get('description'):
+                    desc = market['description'][:100] + "..." if len(market['description']) > 100 else market['description']
+                    semantic_context += f"   Description: {desc}\n"
+                semantic_context += "\n"
+        
         prompt = RESULT_TEMPLATE.format(
             sql=sql,
             rows=json.dumps(rows, indent=2),
             context=json.dumps(context, indent=2),
+            semantic_context=semantic_context,
             history=formatted_history or "(no prior messages)",
             user_question=user_message,
         )
@@ -182,8 +231,23 @@ class GeminiClient:
             self.last_answer_response_text = json.dumps(fallback)
             return fallback
         try:
-            response = self.model.generate_content(prompt)
-            self.last_answer_response_text = getattr(response, "text", None)
+            # Use the tracked client if Opik is configured, otherwise fall back to the old model
+            if self.tracked_client and settings.opik_api_key:
+                # Convert model name format for google.genai client
+                model_name = self.model_name.replace("models/", "") if self.model_name.startswith("models/") else self.model_name
+                response = self.tracked_client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config={
+                        "temperature": 0.1,
+                        "top_p": 0.8,
+                        "response_mime_type": "application/json",
+                    }
+                )
+                self.last_answer_response_text = getattr(response, "text", None)
+            else:
+                response = self.model.generate_content(prompt)
+                self.last_answer_response_text = getattr(response, "text", None)
         except Exception as exc:  # pragma: no cover - defensive fallback
             self.logger.error("Gemini follow-up call failed: %s", exc)
             summary = self._summarize_rows(sql, rows)

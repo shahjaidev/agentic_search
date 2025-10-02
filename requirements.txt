@@ -5,3 +5,8 @@ pydantic
 pydantic-settings
 streamlit
 requests
+httpx
+weaviate-client
+python-dotenv
+opik
+google-genai
